@@ -2,33 +2,38 @@
 
 Sistem keamanan berlapis untuk transaksi Agen AI dengan PayPal.
 
-## Fitur Utama
-- **KYAPay Token Verifier** — Validasi identitas agen AI
-- **JTI Anti-Replay Cache** — Mencegah penggunaan ulang token
-- **DPoP Binding (RFC 9449)** — Pengikatan kriptografis token ke private key agen
-- **TrustGuard Agent** — Orkestrator verifikasi berlapis
-- **Integrasi PayPal API** — End-to-end transaction verified
+## Latar Belakang Masalah
 
-## Lapisan Keamanan
-| Lapisan | Komponen | Standar |
+Ketika agen AI diberi kemampuan untuk bertransaksi dengan uang pengguna, muncul pertanyaan kritis:
+- Bagaimana memastikan agen AI benar-benar terautentikasi?
+- Bagaimana mencegah token yang dicuri digunakan ulang?
+- Bagaimana menegakkan batas kewenangan agen?
+
+PayPal AI Trust Engine menjawab pertanyaan-pertanyaan ini dengan **TrustGuard Agent** — sebuah gerbang keamanan yang memverifikasi setiap permintaan transaksi sebelum diteruskan ke PayPal.
+
+## Arsitektur Keamanan
+
+| Lapisan | Komponen | Status |
 |---|---|---|
-| 1 | KYAPay Token | Draft Skyfire |
-| 2 | Anti-Replay (JTI) | RFC 7523 |
-| 3 | DPoP Binding | RFC 9449 |
-| 4 | TrustGuard Agent | Custom |
+| 1 | KYAPay Token Verifier | ✅ Berfungsi (verifikasi berbasis klaim) |
+| 2 | JTI Anti-Replay Cache | ✅ Berfungsi |
+| 3 | DPoP Verifier (RFC 9449) | ⚠️ Sebagian (verifikasi klaim, bukan signature) |
+| 4 | TrustGuard Agent | ✅ Berfungsi |
 
-## Bukti End-to-End
-- **Order ID PayPal Sandbox**: `9E3172696H384860R`
-- **Status**: `PAYER_ACTION_REQUIRED`
-- **Hasil**: Transaksi berhasil setelah verifikasi TrustGuard
+**Catatan Jujur:** Implementasi saat ini fokus pada **verifikasi berbasis klaim**. Verifikasi tanda tangan kriptografis penuh (JWT signature) dan integrasi AI Agent nyata sedang dalam pengembangan.
+
+## Bukti Transaksi End-to-End
+
+Tiga order berhasil dibuat di PayPal Sandbox sebagai bukti integrasi:
+
+| Order ID | Status PayPal | Keterangan |
+|---|---|---|
+| `7R3064957MB0759941` | PAYER_ACTION_REQUIRED | Order dibuat, menunggu persetujuan |
+| `3HD92730V0626752B` | PAYER_ACTION_REQUIRED | Order dibuat, menunggu persetujuan |
+| `8RJ05941XL2772705` | PAYER_ACTION_REQUIRED | Order dibuat, menunggu persetujuan |
+
+**Catatan:** Status `PAYER_ACTION_REQUIRED` berarti order berhasil dibuat, tetapi pembayaran belum selesai (menunggu persetujuan pembeli). Proses `capture_order` belum diimplementasikan.
 
 ## Cara Menjalankan
-1. Install dependensi: `pip install paypal-agent-toolkit openai-agents`
-2. Isi kredensial PayPal di `main_public.py`
-3. Jalankan: `python main_public.py`
 
-## Kompetisi
-Dibuat untuk **PayPal AI Hackathon 2026** (1 Okt - 12 Nov 2026).
-
-## Keunggulan Kompetitif
-Proyek ini mengisi celah yang belum tersentuh pemenang 2025: **keamanan transaksi agen AI**. Bukan hanya membuat agen bisa membayar, tetapi memastikan pembayaran itu **aman, terverifikasi, dan terbatas**.
+1. Install dependensi:
