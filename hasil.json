@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-10-13 09:00:00",
+  "transaksi_terakhir": {
+    "order_id": "8RJ05941XL2772705",
+    "status": "SUCCESS",
+    "merchant": "api.merchant.com",
+    "total": "USD 50.00"
+  },
+  "statistik": {
+    "total_sukses": 3,
+    "total_diblokir": 6,
+    "tingkat_keamanan": "100%"
+  },
+  "audit_trail": [
+    {"waktu": "08:15", "event": "Token Valid", "hasil": "LULUS"},
+    {"waktu": "08:16", "event": "Replay Attack", "hasil": "DIBLOKIR"},
+    {"waktu": "08:17", "event": "DPoP URL Mismatch", "hasil": "DITOLAK"},
+    {"waktu": "08:20", "event": "E2E Transaksi", "hasil": "SUCCESS"}
+  ]
+}
