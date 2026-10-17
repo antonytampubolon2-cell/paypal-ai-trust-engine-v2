@@ -2,6 +2,12 @@
 
 Sistem keamanan berlapis untuk transaksi Agen AI dengan PayPal.
 
+## 🌐 Live Dashboard Demo
+Klik tautan berikut untuk melihat dashboard interaktif secara langsung:
+👉 **[PayPal AI Trust Engine Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)**
+
+
+
 ## Latar Belakang Masalah
 
 Ketika agen AI diberi kemampuan untuk bertransaksi dengan uang pengguna, muncul pertanyaan kritis:
