@@ -1,45 +1,45 @@
 # PayPal AI Trust Engine
 
-Sistem keamanan berlapis untuk transaksi Agen AI dengan PayPal.
+A multi-layered security gate for AI Agent transactions on PayPal.
 
 ## 🌐 Live Dashboard Demo
-Klik tautan berikut untuk melihat dashboard interaktif secara langsung:
+Experience the live, interactive dashboard directly in your browser:
 👉 **[PayPal AI Trust Engine Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)**
 
+## Background & Problem Statement
 
+As AI agents gain the ability to transact using user funds, critical security questions arise:
+- How do we ensure the AI agent is truly authenticated?
+- How do we prevent stolen tokens from being reused (replay attacks)?
+- How do we enforce strict boundaries on the agent's spending authority?
 
-## Latar Belakang Masalah
+The **PayPal AI Trust Engine** addresses these challenges through the **TrustGuard Agent** — a security gate that meticulously verifies every transaction request before it reaches PayPal.
 
-Ketika agen AI diberi kemampuan untuk bertransaksi dengan uang pengguna, muncul pertanyaan kritis:
-- Bagaimana memastikan agen AI benar-benar terautentikasi?
-- Bagaimana mencegah token yang dicuri digunakan ulang?
-- Bagaimana menegakkan batas kewenangan agen?
+## Security Architecture
 
-PayPal AI Trust Engine menjawab pertanyaan-pertanyaan ini dengan **TrustGuard Agent** — sebuah gerbang keamanan yang memverifikasi setiap permintaan transaksi sebelum diteruskan ke PayPal.
+| Layer | Component | Status |
+| :--- | :--- | :--- |
+| 1 | KYAPay Token Verifier | ✅ Operational (Claim-based verification) |
+| 2 | JTI Anti-Replay Cache | ✅ Operational |
+| 3 | DPoP Verifier (RFC 9449) | ⚠️ Partial (Claim verification, not signature) |
+| 4 | TrustGuard Agent | ✅ Operational |
 
-## Arsitektur Keamanan
+**Honest Note:** The current implementation focuses on claim-based verification. Full cryptographic signature verification (JWT) and native AI Agent integration are currently under development.
 
-| Lapisan | Komponen | Status |
-|---|---|---|
-| 1 | KYAPay Token Verifier | ✅ Berfungsi (verifikasi berbasis klaim) |
-| 2 | JTI Anti-Replay Cache | ✅ Berfungsi |
-| 3 | DPoP Verifier (RFC 9449) | ⚠️ Sebagian (verifikasi klaim, bukan signature) |
-| 4 | TrustGuard Agent | ✅ Berfungsi |
+## End-to-End Transaction Proof
 
-**Catatan Jujur:** Implementasi saat ini fokus pada **verifikasi berbasis klaim**. Verifikasi tanda tangan kriptografis penuh (JWT signature) dan integrasi AI Agent nyata sedang dalam pengembangan.
+Three orders were successfully created in the PayPal Sandbox as proof of integration:
 
-## Bukti Transaksi End-to-End
+| Order ID | PayPal Status | Description |
+| :--- | :--- | :--- |
+| `7R3064957MB0759941` | PAYER_ACTION_REQUIRED | Order created, awaiting payer approval |
+| `3HD92730V0626752B` | PAYER_ACTION_REQUIRED | Order created, awaiting payer approval |
+| `8RJ05941XL2772705` | PAYER_ACTION_REQUIRED | Order created, awaiting payer approval |
 
-Tiga order berhasil dibuat di PayPal Sandbox sebagai bukti integrasi:
+*Note: The `PAYER_ACTION_REQUIRED` status indicates the order was successfully created, but the payment is pending buyer approval. The `capture_order` process is not yet implemented.*
 
-| Order ID | Status PayPal | Keterangan |
-|---|---|---|
-| `7R3064957MB0759941` | PAYER_ACTION_REQUIRED | Order dibuat, menunggu persetujuan |
-| `3HD92730V0626752B` | PAYER_ACTION_REQUIRED | Order dibuat, menunggu persetujuan |
-| `8RJ05941XL2772705` | PAYER_ACTION_REQUIRED | Order dibuat, menunggu persetujuan |
+## Getting Started
 
-**Catatan:** Status `PAYER_ACTION_REQUIRED` berarti order berhasil dibuat, tetapi pembayaran belum selesai (menunggu persetujuan pembeli). Proses `capture_order` belum diimplementasikan.
-
-## Cara Menjalankan
-
-1. Install dependensi:
+1. **Install dependencies:**
+   ```bash
+   pip install paypal-agent-toolkit openai-agents
