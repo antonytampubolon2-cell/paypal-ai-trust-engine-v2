@@ -34,4 +34,29 @@ manifest = {
     "status": "UNVERIFIED_STATIC_FRONTEND",
 }
 (OUT / "build-info.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+(OUT / "index.html").write_text(
+    """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="trustguard-build-commit" content="{sha}">
+<title>PayPal AI Trust Engine — Dashboard</title>
+</head>
+<body>
+<main>
+<h1>PayPal AI Trust Engine</h1>
+<p>Security prototype dashboard. Static status is unverified and is not proof of a live transaction or production security.</p>
+<ul>
+<li><a href="dashboard.html">Dashboard</a></li>
+<li><a href="dashboard_v2.html">Dashboard v2</a></li>
+</ul>
+<p>Frontend build commit: <code id="build-commit">{sha}</code></p>
+<p>Authentication, policy, and delivery status: UNKNOWN until verified backend telemetry is connected.</p>
+</main>
+</body>
+</html>
+""".format(sha=SHA),
+    encoding="utf-8",
+)
 print(f"Built _site from commit {SHA}")
