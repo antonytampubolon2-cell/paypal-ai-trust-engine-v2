@@ -1,4 +1,4 @@
-import os, tempfile, threading, time, unittest
+import os, tempfile, threading, time, unittest, json, hashlib, base64
 from pathlib import Path
 import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -47,6 +47,27 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(sum(outcomes),1)
     def test_dict_proof_rejected(self):
         self.assertFalse(verify_dpop_proof({"htm":"POST"},expected_method="POST",expected_url="https://example.test/pay",replay_store=self.store).allowed)
+
+    def test_valid_signed_token_and_dpop_reach_mock_with_same_checked_transaction(self):
+        now=int(time.time())
+        dpop_key=ec.generate_private_key(ec.SECP256R1())
+        jwk=jwt.algorithms.ECAlgorithm.to_jwk(dpop_key.public_key(),as_dict=True)
+        canonical=json.dumps({k:jwk[k] for k in ("crv","kty","x","y")},separators=(",",":"),sort_keys=True)
+        jkt=base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).decode().rstrip("=")
+        token=self.token(cnf={"jkt":jkt})
+        ath=base64.urlsafe_b64encode(hashlib.sha256(token.encode("ascii")).digest()).decode().rstrip("=")
+        proof=jwt.encode({"htm":"POST","htu":"https://example.test/pay","jti":"proof-"+str(time.time_ns()),"iat":now,"ath":ath},dpop_key,algorithm="ES256",headers={"typ":"dpop+jwt","jwk":jwk})
+        class MockPayPal:
+            def __init__(self): self.calls=[]
+            def run(self,**kwargs): self.calls.append(kwargs); return {"id":"MOCK-ORDER"}
+        mock=MockPayPal()
+        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay")
+        self.assertEqual((result.authentication_status,result.policy_status,result.delivery_status),("PASSED","PASSED","SUCCEEDED"))
+        self.assertEqual(len(mock.calls),1)
+        payload=mock.calls[0]["params"]["purchase_units"][0]
+        self.assertEqual(payload["payee"]["merchant_id"],"merchant-1")
+        self.assertEqual(payload["amount"],{"currency_code":"USD","value":"12.34"})
+
     def test_bad_token_never_calls_paypal(self):
         class NeverCall:
             def run(self,**kwargs): raise AssertionError("unexpected outbound request")
