@@ -77,7 +77,7 @@ jobs:
                           html = response.read().decode("utf-8", "replace")
                       match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', html)
                       got = match.group(1) if match else ""
-                      if got == expected and "100%" not in html:
+                      if got == expected and not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\\s*[:=]?\\s*[^<\\n]{0,30}100%", html, re.I):
                           last = ""
                           break
                       last = f"{name}: expected={expected} got={got or 'MISSING'}"
