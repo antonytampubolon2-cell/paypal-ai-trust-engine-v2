@@ -163,6 +163,7 @@ def verify_dpop_proof(
     expected_url: str,
     replay_store: ReplayStore,
     access_token_claims: Mapping[str, Any] | None = None,
+    access_token: str | None = None,
     now: float | None = None,
     max_age_seconds: int = 300,
 ) -> PolicyResult:
@@ -197,8 +198,16 @@ def verify_dpop_proof(
         )
         if claims.get("htm") != expected_method.upper():
             return PolicyResult(False, "DPoP htm mismatch.")
+        if not validate_canonical_url(expected_url):
+            return PolicyResult(False, "Expected DPoP htu must be an HTTPS URL without query or fragment.")
         if claims.get("htu") != expected_url:
             return PolicyResult(False, "DPoP htu mismatch.")
+        if access_token_claims is not None:
+            if not isinstance(access_token, str) or not access_token:
+                return PolicyResult(False, "The original access token is required to verify DPoP ath.")
+            expected_ath = base64.urlsafe_b64encode(hashlib.sha256(access_token.encode("ascii")).digest()).decode("ascii").rstrip("=")
+            if claims.get("ath") != expected_ath:
+                return PolicyResult(False, "DPoP ath does not match the presented access token.")
         jti = claims.get("jti")
         iat = claims.get("iat")
         if not isinstance(jti, str) or not jti:
