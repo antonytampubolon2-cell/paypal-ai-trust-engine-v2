@@ -34,6 +34,15 @@ class FrontendHardeningTests(unittest.TestCase):
         self.assertIsNone(trx["merchant"])
         self.assertIsNone(trx["total"])
 
+    def test_both_dashboards_expose_same_build_identity_contract(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            self.assertIn('name="trustguard-build-commit"', html)
+            self.assertIn('content="__TRUSTGUARD_BUILD_COMMIT__"', html)
+            self.assertIn('id="build-commit"', html)
+            self.assertIn("__TRUSTGUARD_BUILD_COMMIT__", html)
+        self.assertIn("source identity is not transaction evidence", self.dashboard)
+        self.assertIn("source identity is not transaction evidence", self.dashboard_v2)
+
     def test_dashboard_never_uses_inner_html(self):
         for html in (self.dashboard, self.dashboard_v2):
             self.assertNotIn("innerHTML", html.lower())
