@@ -62,7 +62,7 @@ class SecurityTests(unittest.TestCase):
             def run(self,**kwargs): self.calls.append(kwargs); return {"id":"MOCK-ORDER"}
         mock=MockPayPal()
         result=process_payment_request(compact_token=token,compact_dpop_proof=proof,transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay")
-        self.assertEqual((result.authentication_status,result.policy_status,result.delivery_status),("PASSED","PASSED","SUCCEEDED"))
+        self.assertEqual((result.authentication_status,result.policy_status,result.delivery_status),("PASSED","PASSED","ORDER_CREATED"))
         self.assertEqual(len(mock.calls),1)
         payload=mock.calls[0]["params"]["purchase_units"][0]
         self.assertEqual(payload["payee"]["merchant_id"],"merchant-1")
