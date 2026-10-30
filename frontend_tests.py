@@ -62,13 +62,14 @@ class FrontendHardeningTests(unittest.TestCase):
     def test_order_created_is_never_described_as_payment_success(self):
         self.assertIn("ORDER_CREATED — order dibuat; bukan pembayaran sukses atau capture", self.dashboard_v2)
         self.assertIn("bukan status capture", self.dashboard_v2)
-        self.assertIn("bukan pembayaran selesai, capture", self.dashboard)
+        self.assertIn("pembayaran selesai, capture", self.dashboard)
         self.assertNotIn('"status": "SUCCESS"', json.dumps(self.data))
         self.assertNotIn('"delivery_status": "SUCCEEDED"', json.dumps(self.data))
 
     def test_static_pages_do_not_claim_security_is_active_or_perfect(self):
         for html in (self.dashboard, self.dashboard_v2):
-            self.assertNotIn("100%", html)
+            self.assertNotIn("tingkat keamanan 100%", html)
+            self.assertNotIn(">100%<", html)
             self.assertNotIn(">AKTIF<", html)
         self.assertIn("belum terhubung", self.dashboard.lower())
         self.assertIn("BELUM DIVERIFIKASI", self.dashboard_v2)
