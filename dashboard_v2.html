@@ -65,9 +65,8 @@
 (() => {
   "use strict";
 
-  const AUTH_STATUSES = new Set(["PASSED", "FAILED", "UNKNOWN"]);
-  const POLICY_STATUSES = new Set(["PASSED", "FAILED", "UNKNOWN"]);
-  const DELIVERY_STATUSES = new Set(["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"]);
+  // hasil.json is a static, unsigned file. Its schema is never proof of backend authentication.
+  const DELIVERY_STATUSES = new Set(["UNKNOWN", "ORDER_CREATED"]);
   const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const isNullableString = value => value === null || typeof value === "string";
 
@@ -78,8 +77,9 @@
 
     const trx = data.transaksi_terakhir;
     if (!isNullableString(trx.order_id) || !isNullableString(trx.merchant) || !isNullableString(trx.total)) return false;
-    if (typeof trx.authentication_status !== "string" || !AUTH_STATUSES.has(trx.authentication_status)) return false;
-    if (typeof trx.policy_status !== "string" || !POLICY_STATUSES.has(trx.policy_status)) return false;
+    // Until an authenticated backend telemetry contract exists, only UNKNOWN is
+    // accepted for authentication and policy. A static JSON file cannot assert PASSED.
+    if (trx.authentication_status !== "UNKNOWN" || trx.policy_status !== "UNKNOWN") return false;
     if (typeof trx.delivery_status !== "string" || !DELIVERY_STATUSES.has(trx.delivery_status)) return false;
     if (!Array.isArray(data.audit_trail)) return false;
 
@@ -123,7 +123,7 @@
 
   function deliveryLabel(status) {
     if (status === "ORDER_CREATED") {
-      return "ORDER_CREATED — order dibuat; bukan pembayaran sukses atau capture";
+      return "UNVERIFIED · ORDER_CREATED (klaim file) — order dibuat; bukan pembayaran sukses atau capture";
     }
     return status;
   }
