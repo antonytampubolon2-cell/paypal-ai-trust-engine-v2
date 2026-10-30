@@ -35,7 +35,7 @@ jobs:
               text = (root / name).read_text()
               match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', text)
               assert match and match.group(1) == expected, f"{name}: SHA mismatch"
-              assert not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\\s*[:=]?\\s*[^<\\n]{0,30}100%", text, re.I), f"{name}: unsupported security score claim"
+              assert not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\s*[:=]?\s*[^<\n]{0,30}100%", text, re.I), f"{name}: unsupported security score claim"
           data = json.loads((root / "hasil.json").read_text())
           assert data["source_status"] == "UNVERIFIED"
           assert data["transaksi_terakhir"]["authentication_status"] == "UNKNOWN"
@@ -77,7 +77,7 @@ jobs:
                           html = response.read().decode("utf-8", "replace")
                       match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', html)
                       got = match.group(1) if match else ""
-                      if got == expected and not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\\s*[:=]?\\s*[^<\\n]{0,30}100%", html, re.I):
+                      if got == expected and not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\s*[:=]?\s*[^<\n]{0,30}100%", html, re.I):
                           last = ""
                           break
                       last = f"{name}: expected={expected} got={got or 'MISSING'}"
