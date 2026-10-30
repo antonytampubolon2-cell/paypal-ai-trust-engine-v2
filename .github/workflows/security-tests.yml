@@ -1,7 +1,7 @@
 name: Security tests
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/security-hardening]
   push:
     branches: [codex/security-hardening, codex/frontend-hardening]
 permissions:
