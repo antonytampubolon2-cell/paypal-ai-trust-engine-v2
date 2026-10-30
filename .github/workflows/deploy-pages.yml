@@ -2,6 +2,11 @@ name: Deploy verified frontend to GitHub Pages
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: "Type DEPLOY_TO_PRODUCTION to authorize publishing from main"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.confirm_production_deploy == 'DEPLOY_TO_PRODUCTION'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
