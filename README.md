@@ -77,7 +77,7 @@ The project explores how these risks can be addressed through layered checks bef
 
 PayPal AI Trust Engine introduces **TrustGuard Agent**, a security-oriented workflow that evaluates a request before deciding whether it should proceed to PayPal's order-creation interface.
 
-The prototype brings together authorization-claim validation, an in-memory anti-replay cache, selected DPoP binding checks, and PayPal Sandbox integration.
+The original prototype used synthetic authorization payloads and process-local caches. The `codex/security-hardening` branch replaces that executable demonstration with a fail-closed JWT/DPoP verification boundary and atomic SQLite replay claims. Official KYAPay issuer and delegation contracts remain blockers.
 
 Its intended workflow is:
 
@@ -89,7 +89,7 @@ Its intended workflow is:
 6. If the checks pass, attempt to create a PayPal Sandbox order.
 7. Display relevant project and transaction information through the monitoring dashboard.
 
-The repository currently uses synthetic authorization payloads and mock DPoP data in its verification demonstrations. These tests demonstrate the intended control flow; they should not be interpreted as proof of a complete production-grade identity or DPoP implementation.
+The new regression tests use explicitly synthetic, ephemeral signing keys and a mocked PayPal adapter. They verify code paths only; they do not establish a real KYAPay trust relationship or prove production readiness.
 
 ---
 
@@ -99,7 +99,7 @@ TrustGuard Agent organizes the prototype into the following security layers.
 
 ### 1. KYAPay Token Verifier
 
-The KYAPay verification module checks for required authorization claims, including:
+The new JWT adapter requires a compact signed token and verifies its signature plus configured issuer, audience, expiration, and required claims. It fails closed unless official issuer configuration is supplied. The repository does not contain the authoritative KYAPay token contract.
 
 - Issuer (`iss`)
 - Subject (`sub`)
@@ -108,40 +108,40 @@ The KYAPay verification module checks for required authorization claims, includi
 - Token identifier (`jti`)
 - Delegation grant (`delegation_grant`)
 
-It also checks token expiration and selected delegation constraints, including the grant's validity period and spending limit.
+The delegation policy adapter checks the allowlisted merchant, amount, currency, grant validity, and token expiry. Its expected field names must be confirmed against the actual issuer schema before deployment.
 
 These checks are intended to help establish whether the submitted authorization data contains the required information and remains within the configured constraints.
 
-**Implementation note:** The current demonstration performs structural and selected claim checks against synthetic payloads. It does not establish an external identity or independently validate every issuer and audience claim against a trusted policy.
+**Blocker:** Signature verification is configurable, but no authoritative KYAPay issuer, signing algorithm, public key/JWKS policy, or delegation schema is supplied by this repository. Do not configure invented values.
 
 ### 2. JTI Anti-Replay Cache
 
 The JTI Anti-Replay Cache records accepted token identifiers and rejects an identifier that has already been used while it remains in the cache.
 
-The implementation uses an in-memory Python data structure and removes expired entries.
+The new `SQLiteReplayStore` uses an atomic transaction and unique key to reject duplicate identifiers. It is suitable only for a persistent single-host deployment; multi-host production requires a shared atomic replay store.
 
 This demonstrates the basic anti-replay control:
 
 **Accept a valid token identifier once; reject a repeated identifier.**
 
-The current cache is process-local and is not a persistent or distributed production cache.
+SQLite is persistent and atomic on a single host, but is not a distributed replay store. A shared replay service remains a deployment blocker for multi-host operation.
 
 ### 3. DPoP Verifier — RFC 9449
 
 The prototype includes a DPoP-oriented verifier referencing [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html).
 
-The current implementation checks selected proof fields, including:
+The new DPoP verifier validates a signed compact JWT, public JWK, signature, `typ`, `htm`, canonical HTTPS `htu`, `iat`, `jti`, `ath`, token key binding, and replay protection. Full interoperability and deployment-specific protocol review remain required.
 
 - `htm` — expected HTTP method
 - `htu` — expected HTTP URI
 - `jti` — unique proof identifier
 - `jwk` — public-key information
 
-It also computes a JWK thumbprint and compares it with the token's `cnf.jkt` value. A separate in-memory cache is used to reject a repeated DPoP proof identifier.
+It computes the RFC 7638 thumbprint and compares it with `cnf.jkt`, verifies the `ath` hash against the presented access token, and uses the atomic replay store for proof identifiers.
 
 These checks demonstrate selected binding and replay-detection concepts.
 
-**Important limitation:** The published prototype does not perform full cryptographic signature verification of a DPoP proof. Complete RFC 9449 enforcement requires additional validation, including proof-signature verification and the applicable protocol checks.
+**Important limitation:** The implementation adds cryptographic proof verification but has not passed a full RFC 9449 interoperability suite. The actual issuer/client protocol and any required nonce policy must be confirmed before deployment.
 
 ### 4. Fraud Risk Engine (FRP)
 
@@ -151,11 +151,11 @@ The dashboard is a monitoring interface, not a standalone guarantee that a trans
 
 ### 5. PayPal Agent Toolkit Integration
 
-The project initializes PayPal Agent Toolkit with Sandbox context and enables selected order-related actions.
+The hardened entry point does not initialize the PayPal toolkit on import and does not enable capture actions. Order creation is possible only through an explicitly injected adapter after authentication and policy checks.
 
-In the end-to-end demonstration, a payment request that passes the TrustGuard checks proceeds to a PayPal Sandbox order-creation attempt.
+No live or Sandbox API call is performed by the test suite. A mocked adapter verifies that the outbound order payload uses the same checked merchant, amount, and currency. The real merchant-ID mapping remains unconfirmed.
 
-Requests rejected by the TrustGuard verification workflow are blocked before that order-creation call.
+Requests rejected by authentication or policy checks are blocked before the adapter is called. An order-created result is not treated as proof that a payment was completed or captured.
 
 This integration is intended for controlled testing in the PayPal Sandbox, not for processing real payments.
 
