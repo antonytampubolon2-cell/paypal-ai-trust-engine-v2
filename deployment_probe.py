@@ -1,6 +1,8 @@
 """Verify deployed Pages content and commit identity; never equate HTTP 200 with readiness."""
+import json
 import os
 import re
+import urllib.request
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -75,8 +77,27 @@ def main():
     print(f"LIVE_PROBE pair_consistent={consistent} expected_sha={EXPECTED_SHA or 'NOT_SET'}")
     if not consistent:
         print("LIVE_PROBE verdict=DEPLOYMENT_NOT_VERIFIED failures=DASHBOARD_VERSION_MISMATCH")
+    try:
+        request = urllib.request.Request(
+            f"{BASE_URL}/build-info.json",
+            headers={"Cache-Control": "no-cache", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            manifest = json.loads(response.read().decode("utf-8"))
+        manifest_sha = manifest.get("frontend_commit", "")
+        manifest_ok = bool(re.fullmatch(r"[0-9a-f]{40}", manifest_sha))
+        if EXPECTED_SHA:
+            manifest_ok = manifest_ok and manifest_sha == EXPECTED_SHA
+        print(f"LIVE_PROBE manifest_sha={manifest_sha or 'MISSING'} expected_sha={EXPECTED_SHA or 'NOT_SET'} verdict={'MANIFEST_VERIFIED' if manifest_ok else 'MANIFEST_NOT_VERIFIED'}")
+    except Exception as exc:
+        manifest_ok = False
+        print(f"LIVE_PROBE manifest_sha=MISSING verdict=MANIFEST_NOT_VERIFIED error={type(exc).__name__}: {exc}")
     # Intentionally informational in the security-test workflow. The production
     # deployment workflow has its own strict pre-deploy and post-deploy checks.
+    if os.environ.get("TRUSTGUARD_PROBE_STRICT") == "1":
+        failed = any(r["failures"] for r in results) or not consistent or not manifest_ok
+        if failed:
+            raise SystemExit("DEPLOYMENT_NOT_VERIFIED")
 
 if __name__ == "__main__":
     main()
