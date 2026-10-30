@@ -60,7 +60,7 @@ class FrontendHardeningTests(unittest.TestCase):
         self.assertNotIn("document.write(", self.dashboard_v2)
 
     def test_order_created_is_never_described_as_payment_success(self):
-        self.assertIn("ORDER_CREATED — order dibuat; bukan pembayaran sukses atau capture", self.dashboard_v2)
+        self.assertIn("UNVERIFIED · ORDER_CREATED (klaim file) — order dibuat; bukan pembayaran sukses atau capture", self.dashboard_v2)
         self.assertIn("bukan status capture", self.dashboard_v2)
         self.assertIn("pembayaran selesai, capture", self.dashboard)
         self.assertNotIn('"status": "SUCCESS"', json.dumps(self.data))
