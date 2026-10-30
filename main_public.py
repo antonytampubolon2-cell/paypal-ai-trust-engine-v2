@@ -43,6 +43,7 @@ def process_payment_request(
         expected_url=expected_url,
         replay_store=replay_store,
         access_token_claims=auth.claims,
+        access_token=compact_token,
     )
     if not dpop.allowed:
         return PaymentResult("PASSED", "FAILED", "NOT_ATTEMPTED", dpop.reason)
