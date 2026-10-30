@@ -46,7 +46,9 @@ def probe_page(browser, filename):
         )
         has_unsupported_100 = "100%" in body
         has_success_claim = "SUCCESS" in body.upper() or "SUCCEEDED" in body.upper()
-        if status == 200 and has_unverified_notice and not has_unsupported_100 and not has_success_claim:
+        has_active_claim = "AKTIF" in body.upper()
+        has_end_to_end_claim = "END-TO-END" in body.upper() or "LIVE E2E RUN" in body.upper()
+        if status == 200 and has_unverified_notice and not has_unsupported_100 and not has_success_claim and not has_active_claim and not has_end_to_end_claim:
             verdict = "HTTP_200_EXPECTED_UNVERIFIED_NOTICE_PRESENT"
         elif status == 200:
             verdict = "HTTP_200_BUT_STALE_OR_UNEXPECTED_CONTENT"
@@ -55,6 +57,7 @@ def probe_page(browser, filename):
         print(
             f"LIVE_PROBE file={filename} url={url} http_status={status} verdict={verdict} "
             f"title={title!r} unsupported_100={has_unsupported_100} success_claim={has_success_claim} "
+            f"active_claim={has_active_claim} end_to_end_claim={has_end_to_end_claim} "
             f"console_errors={len(console_errors)} page_errors={len(page_errors)} network_errors={len(network_errors)}"
         )
         if response and status == 200:
