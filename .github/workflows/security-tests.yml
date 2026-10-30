@@ -18,6 +18,10 @@ jobs:
       - run: python -m pip install playwright
       - run: python -m playwright install --with-deps chromium
       - run: python -m unittest -v security_tests frontend_tests frontend_browser_tests
+      - name: Probe published GitHub Pages (informational; does not claim deployment success)
+        env:
+          TRUSTGUARD_PAGES_BASE_URL: https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2
+        run: python deployment_probe.py
       - name: Upload browser screenshots
         if: always()
         uses: actions/upload-artifact@v4
