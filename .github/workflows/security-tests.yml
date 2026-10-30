@@ -17,6 +17,25 @@ jobs:
       - run: python -m pip install -r requirements-security.txt
       - run: python -m pip install playwright
       - run: python -m playwright install --with-deps chromium
+      - name: Validate reproducible Pages artifact
+        run: |
+          python build_pages.py
+          python - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path("_site")
+          expected = os.environ["GITHUB_SHA"]
+          manifest = json.loads((root / "build-info.json").read_text())
+          assert manifest["frontend_commit"] == expected
+          for name in ("dashboard.html", "dashboard_v2.html", "index.html"):
+              html = (root / name).read_text()
+              match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', html)
+              assert match and match.group(1) == expected, f"{name} commit identity mismatch"
+          data = json.loads((root / "hasil.json").read_text())
+          assert data["source_status"] == "UNVERIFIED"
+          assert data["transaksi_terakhir"]["authentication_status"] == "UNKNOWN"
+          assert data["transaksi_terakhir"]["policy_status"] == "UNKNOWN"
+          print("Pages artifact identity and fail-closed status checks passed:", expected)
+          PY
       - run: python -m unittest -v security_tests frontend_tests frontend_browser_tests
       - name: Probe published GitHub Pages (informational; does not claim deployment success)
         env:
