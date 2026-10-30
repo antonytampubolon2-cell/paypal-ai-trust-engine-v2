@@ -2,94 +2,202 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PayPal AI Trust Engine v2</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: 'Segoe UI', Arial, sans-serif;
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    color: #e2e8f0; min-height: 100vh; padding: 40px 20px;
-  }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: #e2e8f0; min-height: 100vh; padding: 40px 20px; }
   .container { max-width: 1000px; margin: 0 auto; }
   h1 { font-size: 36px; color: #60a5fa; margin-bottom: 8px; text-align: center; }
-  .subtitle { text-align: center; color: #94a3b8; margin-bottom: 40px; font-size: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
+  .subtitle { text-align: center; color: #94a3b8; margin-bottom: 28px; font-size: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; margin-bottom: 30px; }
   .card { background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; border-radius: 12px; padding: 24px; }
   .card h3 { font-size: 18px; margin-bottom: 12px; color: #f1f5f9; }
   .card p { font-size: 14px; color: #cbd5e1; margin-bottom: 8px; line-height: 1.6; }
   .status-ok { display: inline-block; background: #10b981; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+  .status-unknown { display: inline-block; background: #475569; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+  .status-block { display: inline-block; background: #b45309; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
   .orders { background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; border-radius: 12px; padding: 24px; margin-bottom: 30px; }
   .orders h3 { color: #60a5fa; margin-bottom: 16px; }
-  .order-id { font-family: 'Courier New', monospace; background: #0f172a; padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; color: #34d399; font-size: 14px; }
-  .audit-item { padding: 8px 12px; border-left: 3px solid #60a5fa; margin-bottom: 8px; background: #0f172a; font-size: 13px; }
+  .order-id { font-family: 'Courier New', monospace; overflow-wrap: anywhere; background: #0f172a; padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; color: #cbd5e1; font-size: 14px; }
+  .audit-item { padding: 8px 12px; border-left: 3px solid #60a5fa; margin-bottom: 8px; background: #0f172a; font-size: 13px; overflow-wrap: anywhere; }
   .footer { text-align: center; color: #64748b; font-size: 13px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #334155; }
-  .stat-box { display: inline-block; background: #1e293b; padding: 16px 24px; border-radius: 8px; margin-right: 12px; text-align: center; }
-  .stat-number { font-size: 32px; font-weight: bold; color: #34d399; display: block; }
-  .stat-label { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+  .stat-box { display: inline-block; background: #1e293b; padding: 16px 24px; border-radius: 8px; margin: 0 12px 12px 0; text-align: center; }
+  .stat-number { font-size: 22px; font-weight: bold; color: #cbd5e1; display: block; overflow-wrap: anywhere; }
+  .stat-label { font-size: 12px; color: #94a3b8; margin-top: 4px; display: block; }
+  .notice { background: #422006; border: 1px solid #92400e; color: #fde68a; border-radius: 10px; padding: 14px 18px; margin-bottom: 28px; line-height: 1.6; }
+  @media (max-width: 520px) { h1 { font-size: 28px; } body { padding: 24px 14px; } .card, .orders { padding: 18px; } .stat-box { padding: 12px 16px; } }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>PayPal AI Trust Engine</h1>
-  <p class="subtitle">Live Data dari hasil.json</p>
+  <p class="subtitle">TrustGuard Agent — status autentikasi, kebijakan, dan delivery</p>
+
+  <div class="notice" id="source-notice" role="status">Memuat data. File statis tidak dengan sendirinya membuktikan status backend.</div>
 
   <div class="grid">
-    <div class="card"><h3>KYAPay Token Verifier</h3><p>Validasi identitas agen AI.</p><span class="status-ok">AKTIF</span></div>
-    <div class="card"><h3>JTI Anti-Replay Cache</h3><p>Mencegah penggunaan ulang token.</p><span class="status-ok">AKTIF</span></div>
-    <div class="card"><h3>DPoP Binding (RFC 9449)</h3><p>Pengikatan kriptografis.</p><span class="status-ok">AKTIF</span></div>
-<div class="card"><h3>Fraud Risk Engine (FRP)</h3><p>Deteksi anomali transaksi mencurigakan.</p><span class="status-ok">AKTIF</span></div>
+    <section class="card"><h3>KYAPay Token Verifier</h3><p>Validasi token perlu dibuktikan dari hasil backend per permintaan.</p><span class="status-unknown">BELUM DIVERIFIKASI</span></section>
+    <section class="card"><h3>JTI Anti-Replay Cache</h3><p>Hasil klaim replay perlu berasal dari pengujian atau telemetry backend.</p><span class="status-unknown">BELUM DIVERIFIKASI</span></section>
+    <section class="card"><h3>DPoP Binding</h3><p>Interoperabilitas penuh dan validasi live belum dibuktikan oleh dashboard.</p><span class="status-unknown">BELUM DIVERIFIKASI</span></section>
+    <section class="card"><h3>Fraud Risk Engine (FRP)</h3><p>Status implementasi dan hasil deteksi live belum terhubung ke halaman ini.</p><span class="status-unknown">BELUM DIVERIFIKASI</span></section>
   </div>
 
-  <div class="orders">
-    <h3>Statistik</h3>
-    <div id="statistik-area">Memuat data...</div>
-  </div>
+  <section class="orders">
+    <h3>Status Keamanan</h3>
+    <div id="statistik-area"><p class="order-id">Memuat status...</p></div>
+  </section>
 
-  <div class="orders">
+  <section class="orders">
     <h3>Transaksi Terakhir</h3>
-    <div id="transaksi-area">Memuat data...</div>
-  </div>
+    <div id="transaksi-area"><p class="order-id">Memuat data...</p></div>
+  </section>
 
-  <div class="orders">
+  <section class="orders">
     <h3>Audit Trail</h3>
-    <div id="audit-area">Memuat data...</div>
-  </div>
+    <div id="audit-area"><p class="order-id">Memuat audit trail...</p></div>
+  </section>
 
-  <div class="footer">
-    <span id="timestamp">-</span> | PayPal AI Trust Engine
-  </div>
+  <div class="footer"><span id="timestamp">Timestamp backend: belum tersedia</span> | PayPal AI Trust Engine · prototipe, bukan sertifikasi keamanan</div>
 </div>
 
 <script>
-fetch('hasil.json')
-  .then(response => response.json())
-  .then(data => {
-    document.getElementById('timestamp').textContent = 'Update: ' + data.timestamp;
+(() => {
+  "use strict";
 
-    const stat = data.statistik;
-    document.getElementById('statistik-area').innerHTML = `
-      <div class="stat-box"><span class="stat-number">${stat.total_sukses}</span><span class="stat-label">Transaksi Sukses</span></div>
-      <div class="stat-box"><span class="stat-number">${stat.total_diblokir}</span><span class="stat-label">Serangan Diblokir</span></div>
-      <div class="stat-box"><span class="stat-number">${stat.tingkat_keamanan}</span><span class="stat-label">Tingkat Keamanan</span></div>
-    `;
+  const AUTH_STATUSES = new Set(["PASSED", "FAILED", "UNKNOWN"]);
+  const POLICY_STATUSES = new Set(["PASSED", "FAILED", "UNKNOWN"]);
+  const DELIVERY_STATUSES = new Set(["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"]);
+  const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const isNullableString = value => value === null || typeof value === "string";
+
+  function validateDashboardData(data) {
+    if (!isRecord(data) || data.schema_version !== 1 || data.source_status !== "UNVERIFIED") return false;
+    if (!isNullableString(data.timestamp)) return false;
+    if (!isRecord(data.transaksi_terakhir)) return false;
 
     const trx = data.transaksi_terakhir;
-    document.getElementById('transaksi-area').innerHTML = `
-      <div class="order-id">Order ID: ${trx.order_id}</div>
-      <div class="order-id">Status: ${trx.status}</div>
-      <div class="order-id">Merchant: ${trx.merchant}</div>
-      <div class="order-id">Total: ${trx.total}</div>
-    `;
+    if (!isNullableString(trx.order_id) || !isNullableString(trx.merchant) || !isNullableString(trx.total)) return false;
+    if (typeof trx.authentication_status !== "string" || !AUTH_STATUSES.has(trx.authentication_status)) return false;
+    if (typeof trx.policy_status !== "string" || !POLICY_STATUSES.has(trx.policy_status)) return false;
+    if (typeof trx.delivery_status !== "string" || !DELIVERY_STATUSES.has(trx.delivery_status)) return false;
+    if (!Array.isArray(data.audit_trail)) return false;
 
-    let auditHtml = '';
-    data.audit_trail.forEach(item => {
-      auditHtml += `<div class="audit-item">[${item.waktu}] ${item.event} → <strong>${item.hasil}</strong></div>`;
+    return data.audit_trail.every(item =>
+      isRecord(item) &&
+      typeof item.waktu === "string" &&
+      typeof item.event === "string" &&
+      typeof item.hasil === "string"
+    );
+  }
+
+  function addTextRow(container, label, value) {
+    const row = document.createElement("div");
+    row.className = "order-id";
+    const labelNode = document.createElement("strong");
+    labelNode.textContent = label + ": ";
+    const valueNode = document.createElement("span");
+    valueNode.textContent = value;
+    row.append(labelNode, valueNode);
+    container.appendChild(row);
+  }
+
+  function addStatusBox(container, label, value, explanation) {
+    const box = document.createElement("div");
+    box.className = "stat-box";
+    const number = document.createElement("span");
+    number.className = "stat-number";
+    number.textContent = value;
+    const caption = document.createElement("span");
+    caption.className = "stat-label";
+    caption.textContent = label;
+    box.append(number, caption);
+    if (explanation) {
+      const detail = document.createElement("span");
+      detail.className = "stat-label";
+      detail.textContent = explanation;
+      box.appendChild(detail);
+    }
+    container.appendChild(box);
+  }
+
+  function deliveryLabel(status) {
+    if (status === "ORDER_CREATED") {
+      return "ORDER_CREATED — order dibuat; bukan pembayaran sukses atau capture";
+    }
+    return status;
+  }
+
+  function renderDashboard(data) {
+    const sourceNotice = document.getElementById("source-notice");
+    sourceNotice.textContent = "Sumber data: file JSON statis berstatus UNVERIFIED. Nilai yang tampil bukan bukti telemetry backend terautentikasi.";
+
+    const statArea = document.getElementById("statistik-area");
+    statArea.replaceChildren();
+    addStatusBox(statArea, "Autentikasi", data.transaksi_terakhir.authentication_status, "hasil terpisah");
+    addStatusBox(statArea, "Kebijakan", data.transaksi_terakhir.policy_status, "hasil terpisah");
+    addStatusBox(statArea, "Delivery", deliveryLabel(data.transaksi_terakhir.delivery_status), "bukan status capture");
+
+    const trxArea = document.getElementById("transaksi-area");
+    trxArea.replaceChildren();
+    addTextRow(trxArea, "Order ID", data.transaksi_terakhir.order_id || "Tidak tersedia");
+    addTextRow(trxArea, "Merchant", data.transaksi_terakhir.merchant || "Tidak tersedia");
+    addTextRow(trxArea, "Total", data.transaksi_terakhir.total || "Tidak tersedia");
+    addTextRow(trxArea, "Autentikasi", data.transaksi_terakhir.authentication_status);
+    addTextRow(trxArea, "Kebijakan", data.transaksi_terakhir.policy_status);
+    addTextRow(trxArea, "Delivery", deliveryLabel(data.transaksi_terakhir.delivery_status));
+
+    const auditArea = document.getElementById("audit-area");
+    auditArea.replaceChildren();
+    if (data.audit_trail.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "order-id";
+      empty.textContent = "Belum ada peristiwa audit terverifikasi.";
+      auditArea.appendChild(empty);
+    } else {
+      data.audit_trail.forEach(item => {
+        const row = document.createElement("div");
+        row.className = "audit-item";
+        const time = document.createElement("span");
+        time.textContent = "[" + item.waktu + "] ";
+        const event = document.createElement("span");
+        event.textContent = item.event + " → ";
+        const result = document.createElement("strong");
+        result.textContent = item.hasil;
+        row.append(time, event, result);
+        auditArea.appendChild(row);
+      });
+    }
+
+    document.getElementById("timestamp").textContent = data.timestamp
+      ? "Timestamp file (belum diverifikasi): " + data.timestamp
+      : "Timestamp backend: belum tersedia";
+  }
+
+  function showLoadError() {
+    document.getElementById("source-notice").textContent = "Data tidak dapat dimuat atau tidak sesuai skema. Semua status harus dianggap UNKNOWN.";
+    ["statistik-area", "transaksi-area", "audit-area"].forEach(id => {
+      const area = document.getElementById(id);
+      area.replaceChildren();
+      const message = document.createElement("p");
+      message.className = "order-id";
+      message.textContent = "Data tidak tersedia.";
+      area.appendChild(message);
     });
-    document.getElementById('audit-area').innerHTML = auditHtml;
-  })
-  .catch(err => {
-    document.getElementById('statistik-area').innerHTML = 'Error: ' + err.message + ' (butuh server lokal)';
-  });
+    document.getElementById("timestamp").textContent = "Timestamp backend: belum tersedia";
+  }
+
+  fetch("hasil.json", { headers: { "Accept": "application/json" } })
+    .then(response => {
+      if (!response.ok) throw new Error("HTTP response not OK");
+      return response.json();
+    })
+    .then(data => {
+      if (!validateDashboardData(data)) throw new Error("Invalid dashboard schema");
+      renderDashboard(data);
+    })
+    .catch(() => showLoadError());
+})();
 </script>
 </body>
 </html>
