@@ -63,7 +63,12 @@ class SecurityTests(unittest.TestCase):
         mock=MockPayPal()
         result=process_payment_request(compact_token=token,compact_dpop_proof=proof,transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay")
         self.assertEqual((result.authentication_status,result.policy_status,result.delivery_status),("PASSED","PASSED","ORDER_CREATED"))
+        # Creating an order is not proof of a completed payment or capture.
+        self.assertNotEqual(result.delivery_status,"SUCCEEDED")
         self.assertEqual(len(mock.calls),1)
+        self.assertEqual(mock.calls[0]["method"],"create_order")
+        self.assertEqual(mock.calls[0]["params"]["intent"],"AUTHORIZE")
+        self.assertNotIn("capture",mock.calls[0]["method"].lower())
         payload=mock.calls[0]["params"]["purchase_units"][0]
         self.assertEqual(payload["payee"]["merchant_id"],"merchant-1")
         self.assertEqual(payload["amount"],{"currency_code":"USD","value":"12.34"})
