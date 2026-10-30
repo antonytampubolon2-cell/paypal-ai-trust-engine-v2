@@ -31,6 +31,13 @@ VALID_DATA = {
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        super().do_GET()
+
     def log_message(self, format, *args):
         pass
 
@@ -71,6 +78,7 @@ class DashboardBrowserTests(unittest.TestCase):
         self.context.close()
 
     def open_v2(self, body):
+        self.page.unroute_all()
         self.page.route(
             "**/hasil.json",
             lambda route: route.fulfill(status=200, content_type="application/json", body=body),
