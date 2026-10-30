@@ -246,122 +246,30 @@ Use a compatible Python environment and resolve any dependency errors before pro
 
 ---
 
-## Judges' Testing Instructions
+## Security Hardening Branch — Safe Verification
 
-This section is intended to help judges run the public Python demonstration using PayPal Sandbox credentials.
+The hardened entry point no longer creates a PayPal order when imported or run directly. It does not capture payments. The KYAPay issuer contract and merchant/delegation schema are not available in this repository, so the backend fails closed until official issuer documentation and trust material are supplied.
 
-**Sandbox credentials must be provided through a private, secure channel or supplied by the judge. Do not publish a Client Secret in this README, a GitHub issue, a commit, or a public project submission.**
+### Run local security tests
 
-### Step 1 — Obtain Sandbox Credentials
-
-Obtain the Sandbox application's:
-
-- **Client ID**
-- **Client Secret**
-
-Use credentials associated with a PayPal Developer Sandbox application, not live-production credentials.
-
-Official resource: [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/).
-
-### Step 2 — Prepare the Public Script for Environment Variables
-
-The currently published `main_public.py` contains placeholder assignments that overwrite environment variables.
-
-Open `main_public.py` in a text editor and locate these lines:
-
-```python
-os.environ["PAYPAL_CLIENT_ID"] = "MASUKKAN_CLIENT_ID_ANDA_DI_SINI"
-os.environ["PAYPAL_CLIENT_SECRET"] = "MASUKKAN_SECRET_ANDA_DI_SINI"
-```
-
-**Delete those two assignment lines from the local copy of the script.** Do not replace them with actual credentials.
-
-The script already reads `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` when it initializes the PayPal Toolkit. Removing the hard-coded placeholder assignments allows those values to be supplied by the environment.
-
-This is a local testing preparation step; it does not change the published GitHub source unless you separately commit a code change.
-
-### Step 3 — Configure Credentials
-
-#### Windows PowerShell
-
-In the same PowerShell session, from the repository directory, run:
-
-```powershell
-$env:PAYPAL_CLIENT_ID = "YOUR_SANDBOX_CLIENT_ID"
-$env:PAYPAL_CLIENT_SECRET = "YOUR_SANDBOX_CLIENT_SECRET"
-```
-
-Replace the example values locally with the actual Sandbox credentials supplied for the test.
-
-#### macOS or Linux
-
-In the same terminal session, run:
+Install the dedicated verifier dependencies and run the automated tests:
 
 ```bash
-export PAYPAL_CLIENT_ID="YOUR_SANDBOX_CLIENT_ID"
-export PAYPAL_CLIENT_SECRET="YOUR_SANDBOX_CLIENT_SECRET"
+python -m pip install -r requirements-security.txt
+python -m unittest -v security_tests
 ```
 
-Replace the example values locally with the actual Sandbox credentials supplied for the test.
+The tests use ephemeral synthetic cryptographic fixtures and a mocked PayPal adapter. They do not prove that a real KYAPay issuer is trusted, and they must never be used as production credentials.
 
-Avoid sharing terminal screenshots or logs that expose the Secret.
+### Required official KYAPay configuration
 
-### Step 4 — Run the Verification and Sandbox Demonstration
+The JWT adapter requires `KYAPAY_ISSUER`, `KYAPAY_AUDIENCE`, `KYAPAY_PUBLIC_KEY_PEM`, and `KYAPAY_JWT_ALGORITHM`. Do not invent these values. Obtain the authoritative token format, signing algorithm, issuer, audience, key-discovery/rotation rules, and delegation schema from the real KYAPay issuer before configuring them.
 
-With the virtual environment activated and the environment variables set, execute:
+### PayPal integration status
 
-```bash
-python main_public.py
-```
+No PayPal API call is made by the test suite or by importing `main_public.py`. The payment dispatcher accepts an injected adapter so integration tests can use a mock. Before connecting a real adapter, confirm the merchant identifier mapping and Orders API payload with official PayPal documentation. An order-creation result is reported as `ORDER_CREATED`, not as a completed or captured payment.
 
-The script runs the security demonstrations and then attempts a PayPal Sandbox order-creation request if the verification workflow permits it.
-
-**Important:** The current demonstration is configured to attempt a Sandbox order for **USD 50.00**. Running it can create a test order in the configured Sandbox account. It does not represent a live payment.
-
-### Step 5 — Review the Console Output
-
-Inspect the console output for:
-
-- PayPal Agent Toolkit initialization and available tools
-- KYAPay token validation results
-- Replayed-token rejection
-- Expired-token rejection
-- DPoP field, binding, and replay-check results
-- TrustGuard allow-or-block decisions
-- The PayPal Sandbox order-creation response
-- The final status reported by the demonstration
-
-The exact response and any generated order identifiers depend on successful authentication, the Sandbox environment, and the PayPal API response.
-
-### Step 6 — Review the Live Dashboard
-
-Open:
-
-[PayPal AI Trust Engine — Live Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)
-
-Use the dashboard to review its security-module status panels and the transaction-related information available from its published data source.
-
-The dashboard is a separate, browser-based monitoring surface. Running `main_public.py` locally does not by itself guarantee that local console results will automatically appear in the deployed dashboard.
-
-### Testing Notes
-
-- Use Sandbox credentials only.
-- Do not commit secrets to GitHub.
-- Use the provided order IDs as review references rather than assuming they will be retrievable by every Sandbox application.
-- If authentication fails, verify that the credentials belong to the Sandbox application and that both environment variables are available in the same shell session.
-- If a Python dependency fails to install, verify the Python environment and the package's current installation requirements.
-
----
-
-## Expected Test Results
-
-A successful demonstration should show the verification workflow evaluating its synthetic test cases, including valid authorization data, a repeated token identifier, and expired authorization data.
-
-The DPoP test cases are designed to demonstrate acceptance of a matching proof, rejection of a repeated proof identifier, and rejection of an HTTP URI mismatch.
-
-For the end-to-end path, a request that passes the configured TrustGuard checks should proceed to the PayPal Sandbox order-creation attempt. The script reports the resulting API response or an error.
-
-An authorization-check success is **not equivalent to a guarantee that PayPal will successfully create an order**. The external request can still fail due to invalid credentials, API errors, dependency problems, or other environment-related issues.
+See [SECURITY_STATUS.md](SECURITY_STATUS.md) for critical blockers and deployment limitations. Do not merge this branch or represent the project as production-ready while those blockers remain unresolved.
 
 ---
 
