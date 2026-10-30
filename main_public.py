@@ -60,7 +60,7 @@ def process_payment_request(
     currency = str(transaction["currency"])
     merchant_id = str(transaction["merchant"])
     params = {
-        "intent": "CAPTURE",
+        "intent": "AUTHORIZE",
         "purchase_units": [{
             "payee": {"merchant_id": merchant_id},
             "amount": {"currency_code": currency, "value": format(amount, ".2f")},
@@ -68,8 +68,10 @@ def process_payment_request(
         }],
     }
     try:
-        paypal_api.run(method="create_order", params=params)
-        return PaymentResult("PASSED", "PASSED", "SUCCEEDED", "PayPal create_order returned successfully.")
+        response = paypal_api.run(method="create_order", params=params)
+        if not isinstance(response, Mapping) or not isinstance(response.get("id"), str) or not response["id"]:
+            return PaymentResult("PASSED", "PASSED", "UNKNOWN", "PayPal adapter returned no verifiable order identifier.")
+        return PaymentResult("PASSED", "PASSED", "ORDER_CREATED", "PayPal order was created; this does not mean payment was captured or completed.")
     except Exception:
         # Do not return raw provider exceptions or secrets to callers.
         return PaymentResult("PASSED", "PASSED", "FAILED", "PayPal order creation failed; provider details were redacted.")
