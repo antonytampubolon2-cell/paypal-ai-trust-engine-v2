@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit
 
 import jwt
@@ -89,9 +89,16 @@ class PolicyResult:
 
 @dataclass(frozen=True)
 class PaymentResult:
+    """Report independent security and delivery outcomes.
+
+    ORDER_CREATED means only that PayPal returned an order identifier.
+    It must never be interpreted as payment success, authorization completion,
+    capture, settlement, or fulfillment. Delivery statuses intentionally exclude
+    SUCCEEDED to prevent order creation from being conflated with payment success.
+    """
     authentication_status: str
     policy_status: str
-    delivery_status: str
+    delivery_status: Literal["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"]
     reason: str = ""
 
 
