@@ -9,9 +9,7 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from trustguard_security import (
-    AuthenticationResult,
     PaymentResult,
-    PolicyResult,
     ReplayStore,
     authenticate_kyapay_jwt,
     authorize_delegated_transaction,
@@ -59,16 +57,17 @@ def process_payment_request(
     # Build the outbound order amount/currency from the same checked canonical object.
     amount = Decimal(str(transaction["amount"]))
     currency = str(transaction["currency"])
+    merchant_id = str(transaction["merchant"])
     params = {
-        "currency_code": currency,
-        "items": [{
-            "name": str(transaction.get("description", "Authorized transaction")),
-            "quantity": "1",
-            "unit_amount": {"currency_code": currency, "value": format(amount, ".2f")},
+        "intent": "CAPTURE",
+        "purchase_units": [{
+            "payee": {"merchant_id": merchant_id},
+            "amount": {"currency_code": currency, "value": format(amount, ".2f")},
+            "description": str(transaction.get("description", "Authorized transaction")),
         }],
     }
     try:
-        response = paypal_api.run(method="create_order", params=params)
+        paypal_api.run(method="create_order", params=params)
         return PaymentResult("PASSED", "PASSED", "SUCCEEDED", "PayPal create_order returned successfully.")
     except Exception:
         # Do not return raw provider exceptions or secrets to callers.
