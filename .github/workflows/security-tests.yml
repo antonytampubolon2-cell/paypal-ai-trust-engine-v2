@@ -36,7 +36,6 @@ jobs:
       - name: Probe currently published Pages (informational only)
         env:
           TRUSTGUARD_PAGES_BASE_URL: https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2
-          TRUSTGUARD_EXPECTED_COMMIT_SHA: ${{ github.sha }}
         run: python deployment_probe.py
       - name: Upload browser screenshots
         if: always()
