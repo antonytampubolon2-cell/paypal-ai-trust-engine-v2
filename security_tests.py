@@ -70,8 +70,16 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(mock.calls[0]["params"]["intent"],"AUTHORIZE")
         self.assertNotIn("capture",mock.calls[0]["method"].lower())
         payload=mock.calls[0]["params"]["purchase_units"][0]
-        self.assertEqual(payload["payee"]["merchant_id"],"merchant-1")
-        self.assertEqual(payload["amount"],{"currency_code":"USD","value":"12.34"})
+        canonical=canonicalize_transaction(
+            {"merchant":"merchant-1","amount":"12.34","currency":"USD"},
+            merchant_mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"},
+        )
+        self.assertEqual(payload["payee"]["merchant_id"],canonical.paypal_merchant_id)
+        self.assertEqual(payload["amount"],{
+            "currency_code":canonical.currency,
+            "value":canonical.amount_text,
+        })
+        self.assertEqual(payload["description"],canonical.description)
 
 
     def test_canonical_amount_rejects_excess_precision_and_invalid_values(self):
@@ -112,5 +120,49 @@ class SecurityTests(unittest.TestCase):
             def run(self,**kwargs): raise AssertionError("unexpected outbound request")
         result=process_payment_request(compact_token="bad",compact_dpop_proof="bad",transaction={"merchant":"merchant-1","amount":"1","currency":"USD"},replay_store=self.store,paypal_api=NeverCall(),expected_url="https://example.test/pay")
         self.assertEqual(result.delivery_status,"NOT_ATTEMPTED")
+
+
+    def test_invalid_request_transactions_never_call_paypal(self):
+        """Every invalid request is rejected before the injected PayPal adapter is invoked."""
+        scenarios = [
+            ("usd_excess_precision", {"merchant":"merchant-1","amount":"1.239","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("zero", {"merchant":"merchant-1","amount":"0","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("negative", {"merchant":"merchant-1","amount":"-1","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("malformed", {"merchant":"merchant-1","amount":"one-dollar","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("nan", {"merchant":"merchant-1","amount":"NaN","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("infinity", {"merchant":"merchant-1","amount":"Infinity","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("excess_precision", {"merchant":"merchant-1","amount":"1.230","currency":"USD"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("unsupported_currency", {"merchant":"merchant-1","amount":"1.00","currency":"XYZ"}, {"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}),
+            ("missing_mapping", {"merchant":"merchant-1","amount":"1.00","currency":"USD"}, {}),
+            ("empty_mapping_value", {"merchant":"merchant-1","amount":"1.00","currency":"USD"}, {"merchant-1":""}),
+            ("delegation_merchant_mismatch", {"merchant":"other-merchant","amount":"1.00","currency":"USD"}, {"other-merchant":"PAYPAL-OTHER-EXPLICIT"}),
+        ]
+        for label, transaction, mapping in scenarios:
+            with self.subTest(scenario=label):
+                now=int(time.time())
+                dpop_key=ec.generate_private_key(ec.SECP256R1())
+                jwk=jwt.algorithms.ECAlgorithm.to_jwk(dpop_key.public_key(),as_dict=True)
+                canonical=json.dumps({k:jwk[k] for k in ("crv","kty","x","y")},separators=(",",":"),sort_keys=True)
+                jkt=base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).decode().rstrip("=")
+                token=self.token(cnf={"jkt":jkt},jti="invalid-"+label+"-"+str(time.time_ns()))
+                ath=base64.urlsafe_b64encode(hashlib.sha256(token.encode("ascii")).digest()).decode().rstrip("=")
+                proof=jwt.encode(
+                    {"htm":"POST","htu":"https://example.test/pay","jti":"proof-"+label+"-"+str(time.time_ns()),"iat":now,"ath":ath},
+                    dpop_key,algorithm="ES256",headers={"typ":"dpop+jwt","jwk":jwk},
+                )
+                class NeverCallPayPal:
+                    def __init__(self): self.calls=[]
+                    def run(self,**kwargs):
+                        self.calls.append(kwargs)
+                        raise AssertionError("PayPal mock must not be called for invalid request")
+                mock=NeverCallPayPal()
+                result=process_payment_request(
+                    compact_token=token,compact_dpop_proof=proof,transaction=transaction,
+                    replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay",
+                    merchant_mapping=mapping,
+                )
+                self.assertEqual(result.delivery_status,"NOT_ATTEMPTED",label)
+                self.assertEqual(result.policy_status,"FAILED",label)
+                self.assertEqual(mock.calls,[],label)
 
 if __name__=="__main__": unittest.main()
