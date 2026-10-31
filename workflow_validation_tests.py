@@ -27,12 +27,16 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertIn("DEPLOY_TO_PRODUCTION", build_if)
         self.assertIn("actions/upload-pages-artifact@", str(workflow))
         self.assertIn("actions/deploy-pages@", str(workflow))
+        self.assertNotIn("push", workflow["on"], "production Pages publish must not run automatically")
+        self.assertNotIn("pull_request", workflow["on"], "PR checks must not publish publicly")
 
     def test_deployment_workflow_has_post_deploy_identity_probe(self):
         workflow_text = (ROOT / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
         self.assertIn("build-info.json", workflow_text)
         self.assertIn("trustguard-build-commit", workflow_text)
         self.assertIn("DEPLOYMENT_NOT_VERIFIED", workflow_text)
+        self.assertIn("path: _site", workflow_text)
+        self.assertIn("manifest[\"frontend_commit\"] == expected", workflow_text)
 
     def test_deployment_permissions_and_predeploy_gates_are_least_privilege(self):
         workflow = load_workflow(".github/workflows/deploy-pages.yml")
@@ -67,6 +71,12 @@ class WorkflowValidationTests(unittest.TestCase):
     def test_release_repair_branch_is_in_ci_push_matrix(self):
         workflow_text = (ROOT / ".github/workflows/security-tests.yml").read_text(encoding="utf-8")
         self.assertIn("codex/pages-release-repair", workflow_text)
+        self.assertIn("codex/pages-release-audit-stage-5-2", workflow_text)
+
+    def test_build_refuses_environment_sha_that_differs_from_checkout(self):
+        build_text = (ROOT / "build_pages.py").read_text(encoding="utf-8")
+        self.assertIn('git", "rev-parse", "HEAD"', build_text)
+        self.assertIn("GITHUB_SHA does not match the checked-out commit", build_text)
 
     def test_embedded_deployment_python_scripts_are_syntactically_valid(self):
         workflow = load_workflow(".github/workflows/deploy-pages.yml")
