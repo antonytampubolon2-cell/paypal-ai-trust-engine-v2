@@ -119,10 +119,8 @@ class SecurityTests(unittest.TestCase):
             merchant_mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"},
         )
         self.assertEqual(payload["payee"]["merchant_id"],canonical.paypal_merchant_id)
-        self.assertEqual(payload["amount"],{
-            "currency_code":canonical.currency,
-            "value":canonical.amount_text,
-        })
+        self.assertEqual(payload["amount"]["currency_code"], canonical.currency)
+        self.assertEqual(payload["amount"]["value"], canonical.amount_text)
         self.assertEqual(payload["description"],canonical.description)
         self.assertEqual(payload["amount"]["breakdown"]["item_total"], {
             "currency_code": "USD", "value": "12.34"
