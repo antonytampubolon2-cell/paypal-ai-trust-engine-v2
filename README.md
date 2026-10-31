@@ -47,13 +47,13 @@ PayPal AI Trust Engine explores a layered approach to this problem through **Tru
 | Dashboard Hosting | GitHub Pages |
 | License | MIT |
 
-## Live Demo
+## Dashboard URL and deployment status
 
-**Explore the deployed monitoring dashboard:**
+The intended public dashboard URL is:
 
-[Open the PayPal AI Trust Engine Live Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)
+[PayPal AI Trust Engine dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)
 
-The dashboard provides a visual overview of the security modules, transaction-related information, statistics, and audit-oriented monitoring data exposed by the project.
+**Deployment status: UNVERIFIED.** A URL existing in this README is not proof that GitHub Pages currently serves the latest build. The release workflow must verify both dashboards and the root-level `build-info.json` against the exact release commit before a deployment can be called verified.
 
 **Source Code:** [GitHub Repository](https://github.com/antonytampubolon2-cell/paypal-ai-trust-engine-v2)
 
@@ -340,3 +340,44 @@ See [SECURITY_STATUS.md](SECURITY_STATUS.md) for the current blockers. A passing
 Stage 4 inventory and call-site findings are recorded in [`COMPATIBILITY_AUDIT.md`](COMPATIBILITY_AUDIT.md). The current backend contract is keyword-only `process_payment_request(...)`; callers must provide the token, DPoP proof, transaction, replay store, and expected URL explicitly. The old `execute_safe_payment()` symbol is not present in this repository, and no in-repository dependency on it was found. No insecure legacy adapter is provided.
 
 The dashboard reads static `hasil.json` and is not connected to authenticated backend telemetry. Its `UNVERIFIED` source and `UNKNOWN` transaction statuses are not evidence of an authenticated or completed payment. The only runtime order-dispatch call is the injected adapter call after the security gates; this prototype does not capture payments.
+
+
+## GitHub Pages release pipeline
+
+### Artifact contract
+
+The CI and release workflows run `python build_pages.py` from the checked-out commit and publish the generated `_site/` directory as the Pages artifact. The artifact root contains:
+
+- `index.html`
+- `dashboard.html`
+- `dashboard_v2.html`
+- `hasil.json`
+- `build-info.json`
+
+`build-info.json` is generated during the build; it is not a tracked source file at the repository root. It must be deployed from the root of the `_site/` artifact, so a Pages configuration that publishes the repository root or another branch folder will not contain this generated manifest. The builder now refuses to continue if `GITHUB_SHA` disagrees with the actual checked-out Git commit. Both dashboards and the index display the same source commit identity, while `hasil.json` remains static, `UNVERIFIED`, and fail-closed.
+
+### Publish gate and owner action
+
+The production deployment workflow is deliberately manual and restricted to `main`; it requires the explicit `DEPLOY_TO_PRODUCTION` confirmation. CI on a feature branch builds and tests artifacts but does **not** publish them. The public deployment is **UNVERIFIED** until the strict post-deploy probe confirms both dashboards and `build-info.json` identify the expected commit.
+
+Before a future authorized release, the repository owner must check **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**. Then, when publication is explicitly authorized, the owner can run **Actions → Deploy verified frontend to GitHub Pages** against `main` and provide the required confirmation. This audit does not change Pages settings and does not dispatch the production workflow.
+
+A `build-info.json` HTTP 404 alone cannot establish which external setting is wrong. It is consistent with the generated `_site/build-info.json` not having been deployed (for example, if Pages still publishes a branch/root folder) or with no successful deployment of the current artifact. The Settings → Pages source and deployment history must be inspected by a repository owner to distinguish those cases.
+
+### Test and deployment evidence
+
+Run the complete CI contract locally after installing dependencies:
+
+```bash
+python -m pip install -r requirements-security.txt
+python -m pip install playwright pyyaml
+python -m playwright install chromium
+python build_pages.py
+python -m unittest -v pages_artifact_tests
+python -m unittest -v workflow_validation_tests
+python -m unittest -v security_tests
+python -m unittest -v frontend_tests
+python -m unittest -v frontend_browser_tests
+```
+
+These tests validate source and generated artifact behavior. They do not establish that public Pages is updated, that the backend telemetry is authenticated, or that payment/provider integration is production-ready.
