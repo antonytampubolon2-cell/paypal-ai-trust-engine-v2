@@ -3,7 +3,7 @@ from pathlib import Path
 import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
-from trustguard_security import SQLiteReplayStore, authenticate_kyapay_jwt, authorize_delegated_transaction, verify_dpop_proof
+from trustguard_security import SQLiteReplayStore, authenticate_kyapay_jwt, authorize_delegated_transaction, verify_dpop_proof, canonicalize_transaction
 from main_public import process_payment_request
 
 class SecurityTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class SecurityTests(unittest.TestCase):
             def __init__(self): self.calls=[]
             def run(self,**kwargs): self.calls.append(kwargs); return {"id":"MOCK-ORDER"}
         mock=MockPayPal()
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay")
+        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay",merchant_mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"})
         self.assertEqual((result.authentication_status,result.policy_status,result.delivery_status),("PASSED","PASSED","ORDER_CREATED"))
         # Creating an order is not proof of a completed payment or capture.
         self.assertNotEqual(result.delivery_status,"SUCCEEDED")
@@ -72,6 +72,40 @@ class SecurityTests(unittest.TestCase):
         payload=mock.calls[0]["params"]["purchase_units"][0]
         self.assertEqual(payload["payee"]["merchant_id"],"merchant-1")
         self.assertEqual(payload["amount"],{"currency_code":"USD","value":"12.34"})
+
+
+    def test_canonical_amount_rejects_excess_precision_and_invalid_values(self):
+        mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}
+        for amount in ("1.239", "0", "-1", "NaN", "Infinity", "-Infinity", "not-a-number"):
+            with self.subTest(amount=amount):
+                with self.assertRaises(ValueError):
+                    canonicalize_transaction({"merchant":"merchant-1","amount":amount,"currency":"USD"},merchant_mapping=mapping)
+
+    def test_canonical_currency_minor_units_and_unsupported_currency(self):
+        mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"}
+        self.assertEqual(canonicalize_transaction({"merchant":"merchant-1","amount":"1.239","currency":"BHD"},merchant_mapping=mapping).amount_text,"1.239")
+        self.assertEqual(canonicalize_transaction({"merchant":"merchant-1","amount":"123","currency":"JPY"},merchant_mapping=mapping).amount_text,"123")
+        for currency,amount in (("JPY","1.2"),("XYZ","1.00")):
+            with self.subTest(currency=currency,amount=amount):
+                with self.assertRaises(ValueError):
+                    canonicalize_transaction({"merchant":"merchant-1","amount":amount,"currency":currency},merchant_mapping=mapping)
+
+    def test_canonical_merchant_mapping_is_explicit(self):
+        tx={"merchant":"merchant-1","amount":"1.00","currency":"USD"}
+        with self.assertRaises(ValueError):
+            canonicalize_transaction(tx,merchant_mapping={})
+        canonical=canonicalize_transaction(tx,merchant_mapping={"merchant-1":"PAYPAL-REAL-ID-EXPLICIT"})
+        self.assertEqual(canonical.paypal_merchant_id,"PAYPAL-REAL-ID-EXPLICIT")
+        self.assertNotEqual(canonical.paypal_merchant_id,canonical.merchant)
+
+    def test_spending_limit_boundary(self):
+        now=time.time()
+        claims={"exp":now+100,"jti":"limit-boundary","delegation_grant":{"allowed_merchants":["merchant-1"],"max_spend":"10.00","currency":"USD","valid_until":now+100}}
+        allowed=authorize_delegated_transaction(claims,{"merchant":"merchant-1","amount":"10.00","currency":"USD"},self.store,now=now)
+        self.assertTrue(allowed.allowed)
+        over={"exp":now+100,"jti":"limit-over","delegation_grant":{"allowed_merchants":["merchant-1"],"max_spend":"10.00","currency":"USD","valid_until":now+100}}
+        denied=authorize_delegated_transaction(over,{"merchant":"merchant-1","amount":"10.01","currency":"USD"},self.store,now=now)
+        self.assertFalse(denied.allowed)
 
     def test_bad_token_never_calls_paypal(self):
         class NeverCall:
