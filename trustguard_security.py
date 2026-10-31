@@ -162,17 +162,30 @@ class PolicyResult:
 
 @dataclass(frozen=True)
 class PaymentResult:
-    """Report independent security and delivery outcomes.
+    """Backward-compatible, independent security and transaction lifecycle statuses.
 
-    ORDER_CREATED means only that PayPal returned an order identifier.
-    It must never be interpreted as payment success, authorization completion,
-    capture, settlement, or fulfillment. Delivery statuses intentionally exclude
-    SUCCEEDED to prevent order creation from being conflated with payment success.
+    Legacy policy_status and delivery_status remain available. New callers should
+    use authorization_status and order_status. ORDER_CREATED means only that PayPal
+    returned an order identifier; capture remains NOT_ATTEMPTED because this
+    dispatcher never captures payments.
     """
     authentication_status: str
     policy_status: str
     delivery_status: Literal["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"]
     reason: str = ""
+    dpop_status: str = "NOT_RUN"
+    authorization_status: str = "NOT_RUN"
+    order_status: Literal["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"] = "NOT_ATTEMPTED"
+    capture_status: Literal["NOT_ATTEMPTED"] = "NOT_ATTEMPTED"
+
+    def __post_init__(self) -> None:
+        # Keep legacy and explicit order/authorization fields coherent.
+        if self.authorization_status == "NOT_RUN" and self.policy_status != "NOT_RUN":
+            object.__setattr__(self, "authorization_status", self.policy_status)
+        if self.order_status == "NOT_ATTEMPTED" and self.delivery_status != "NOT_ATTEMPTED":
+            object.__setattr__(self, "order_status", self.delivery_status)
+        if self.delivery_status != self.order_status:
+            object.__setattr__(self, "delivery_status", self.order_status)
 
 
 def _required_env(name: str) -> str:
