@@ -335,4 +335,65 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(len(mock.calls),1)
 
 
+    def test_current_entrypoint_contract_is_keyword_only_and_legacy_entrypoint_is_absent(self):
+        """Old positional calls fail before any adapter can be invoked."""
+        import inspect
+        import main_public
+
+        signature = inspect.signature(process_payment_request)
+        self.assertTrue(all(
+            parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            for parameter in signature.parameters.values()
+        ))
+        self.assertFalse(hasattr(main_public, "execute_safe_payment"))
+        mock = self.MockPayPal()
+        with self.assertRaises(TypeError):
+            process_payment_request("legacy-token", "legacy-proof", self.valid_transaction(),
+                                    self.store, mock, "POST", "https://example.test/pay")
+        self.assertEqual(mock.calls, [])
+
+    def test_runtime_modules_have_no_direct_paypal_sdk_or_capture_bypass(self):
+        """Only the guarded dispatcher may call the injected create-order adapter."""
+        import ast
+        root = Path(__file__).resolve().parent
+        runtime_files = [
+            root / "main_public.py",
+            root / "trustguard_security.py",
+            root / "build_pages.py",
+            root / "deployment_probe.py",
+        ]
+        direct_sdk_modules = {"paypal", "paypalrestsdk", "paypal_agent_toolkit", "paypal_agent"}
+        direct_sdk_imports = []
+        adapter_calls = []
+        capture_calls = []
+        for path in runtime_files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    direct_sdk_imports.extend(alias.name for alias in node.names
+                                              if alias.name.split(".")[0].lower() in direct_sdk_modules)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module and node.module.split(".")[0].lower() in direct_sdk_modules:
+                        direct_sdk_imports.append(node.module)
+                elif isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Attribute) and func.attr == "run":
+                        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                        method = keywords.get("method")
+                        if isinstance(method, ast.Constant) and method.value == "create_order":
+                            adapter_calls.append((path.name, node.lineno))
+                        if isinstance(method, ast.Constant) and "capture" in str(method.value).lower():
+                            capture_calls.append((path.name, node.lineno))
+                    if isinstance(func, ast.Attribute) and "capture" in func.attr.lower():
+                        capture_calls.append((path.name, node.lineno))
+        self.assertEqual(direct_sdk_imports, [])
+        self.assertEqual(adapter_calls, [("main_public.py", next(
+            node.lineno for node in ast.walk(ast.parse((root / "main_public.py").read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "run"
+        ))])
+        self.assertEqual(capture_calls, [])
+
+
+
 if __name__=="__main__": unittest.main()
