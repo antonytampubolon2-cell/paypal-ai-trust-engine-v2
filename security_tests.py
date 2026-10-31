@@ -358,10 +358,10 @@ class SecurityTests(unittest.TestCase):
         import ast
         root = Path(__file__).resolve().parent
         runtime_files = [
-            root / "main_public.py",
-            root / "trustguard_security.py",
-            root / "build_pages.py",
-            root / "deployment_probe.py",
+            root / name for name in (
+                "main_public.py", "trustguard_security.py", "paypal_rest.py",
+                "build_pages.py", "deployment_probe.py",
+            ) if (root / name).is_file()
         ]
         direct_sdk_modules = {"paypal", "paypalrestsdk", "paypal_agent_toolkit", "paypal_agent"}
         direct_sdk_imports = []
