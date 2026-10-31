@@ -1,5 +1,6 @@
 import os, tempfile, threading, time, unittest, json, hashlib, base64
 from pathlib import Path
+from decimal import Decimal
 import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
