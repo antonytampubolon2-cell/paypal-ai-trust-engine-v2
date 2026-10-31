@@ -78,6 +78,15 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertIn('git", "rev-parse", "HEAD"', build_text)
         self.assertIn("GITHUB_SHA does not match the checked-out commit", build_text)
 
+    def test_informational_public_probe_checks_internal_consistency_not_pr_merge_sha(self):
+        workflow = load_workflow(".github/workflows/security-tests.yml")
+        steps = workflow["jobs"]["test"]["steps"]
+        probe = next(step for step in steps if step.get("name") == "Probe currently published Pages (informational only)")
+        self.assertNotIn("TRUSTGUARD_EXPECTED_COMMIT_SHA", probe.get("env", {}))
+        probe_text = (ROOT / "deployment_probe.py").read_text(encoding="utf-8")
+        self.assertIn("manifest_sha == dashboard_sha", probe_text)
+        self.assertIn("DASHBOARD_VERSION_MISMATCH", probe_text)
+
     def test_embedded_deployment_python_scripts_are_syntactically_valid(self):
         workflow = load_workflow(".github/workflows/deploy-pages.yml")
         scripts = []
