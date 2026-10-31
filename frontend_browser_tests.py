@@ -204,8 +204,8 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertIn("Semua status harus dianggap UNKNOWN", text)
         self.assertIn("Data tidak tersedia.", text)
         self.assertNotIn("PASSED", text)
-        self.assertEqual(self.console_errors, [])
         self.assertEqual(self.page_errors, [])
+        self.assertTrue(any("ERR_FAILED" in item for item in self.console_errors), self.console_errors)
 
     def test_stale_timestamp_remains_unverified_and_unknown(self):
         data = json.loads(json.dumps(VALID_DATA))
