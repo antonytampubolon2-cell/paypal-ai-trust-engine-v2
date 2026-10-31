@@ -53,6 +53,15 @@ class PayPalRestItemsTests(unittest.TestCase):
                 with self.assertRaises(RestItemValidationError):
                     normalize_rest_items([item], currency="USD", approved_amount=Decimal("1.23"))
 
+    def test_malformed_category_is_rejected_without_type_error(self):
+        item = {
+            "name": "Test item", "quantity": "1",
+            "unit_amount": {"currency_code": "USD", "value": "5.00"},
+            "category": [],
+        }
+        with self.assertRaises(RestItemValidationError):
+            normalize_rest_items([item], currency="USD", approved_amount=Decimal("5.00"))
+
     def test_zero_negative_and_non_integer_quantity_rejected(self):
         for quantity in ("0", "-1", "1.5", True):
             with self.subTest(quantity=quantity):
