@@ -47,3 +47,10 @@ python -m unittest -v workflow_validation_tests
 ```
 
 A passing synthetic test suite does not resolve the issuer/schema/merchant/replay-store/cumulative-spend/idempotency blockers above.
+
+
+## Stage 4 compatibility audit
+
+The repository-wide call-site inventory is documented in [`COMPATIBILITY_AUDIT.md`](COMPATIBILITY_AUDIT.md). The only dispatcher definition is the keyword-only `process_payment_request()` in `main_public.py`; its in-repository caller is the mock-based security test suite and uses keyword arguments. `execute_safe_payment()` is absent and no in-repository caller depends on it. There is no direct PayPal SDK import or capture call in runtime Python modules; order creation is available only through the injected adapter after all security checks pass.
+
+The dashboard is a static, untrusted data consumer and cannot establish authenticated backend telemetry. This audit does not resolve the critical blockers listed above: official KYAPay contract, verified merchant mapping, distributed replay protection, cumulative-spend reservation, order idempotency, and full DPoP/provider interoperability.
