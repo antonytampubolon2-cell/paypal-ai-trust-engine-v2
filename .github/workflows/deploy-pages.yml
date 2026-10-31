@@ -1,0 +1,105 @@
+name: Deploy verified frontend to GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: "Type DEPLOY_TO_PRODUCTION to authorize publishing from main"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_production_deploy == 'DEPLOY_TO_PRODUCTION'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build static site with commit identity
+        run: python build_pages.py
+      - name: Validate build identity and content
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path("_site")
+          expected = os.environ["EXPECTED_SHA"]
+          manifest = json.loads((root / "build-info.json").read_text())
+          assert manifest["frontend_commit"] == expected, "build manifest SHA mismatch"
+          for name in ("dashboard.html", "dashboard_v2.html"):
+              text = (root / name).read_text()
+              match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', text)
+              assert match and match.group(1) == expected, f"{name}: SHA mismatch"
+              assert not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\s*[:=]?\s*[^<\n]{0,30}100%", text, re.I), f"{name}: unsupported security score claim"
+          data = json.loads((root / "hasil.json").read_text())
+          assert data["source_status"] == "UNVERIFIED"
+          assert data["transaksi_terakhir"]["authentication_status"] == "UNKNOWN"
+          assert data["transaksi_terakhir"]["policy_status"] == "UNKNOWN"
+          print("Pre-deploy artifact checks passed for", expected)
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify public pages identify this exact commit
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          BASE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          python - <<'PY'
+          import os, time, urllib.request, re, json
+          base, expected = os.environ["BASE_URL"].rstrip("/"), os.environ["EXPECTED_SHA"]
+          errors = []
+          for name in ("dashboard.html", "dashboard_v2.html"):
+              last = ""
+              for attempt in range(8):
+                  try:
+                      req = urllib.request.Request(base + "/" + name, headers={"Cache-Control": "no-cache"})
+                      with urllib.request.urlopen(req, timeout=15) as response:
+                          html = response.read().decode("utf-8", "replace")
+                      match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', html)
+                      got = match.group(1) if match else ""
+                      if got == expected and not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\s*[:=]?\s*[^<\n]{0,30}100%", html, re.I):
+                          last = ""
+                          break
+                      last = f"{name}: expected={expected} got={got or 'MISSING'}"
+                  except Exception as exc:
+                      last = f"{name}: {type(exc).__name__}: {exc}"
+                  time.sleep(10)
+              if last:
+                  errors.append(last)
+          try:
+              req = urllib.request.Request(base + "/build-info.json", headers={"Cache-Control": "no-cache"})
+              with urllib.request.urlopen(req, timeout=15) as response:
+                  manifest = json.loads(response.read().decode("utf-8"))
+              if manifest.get("frontend_commit") != expected:
+                  errors.append(f"build-info.json: expected={expected} got={manifest.get('frontend_commit', 'MISSING')}")
+          except Exception as exc:
+              errors.append(f"build-info.json: {type(exc).__name__}: {exc}")
+          if errors:
+              raise SystemExit("DEPLOYMENT_NOT_VERIFIED: " + "; ".join(errors))
+          print("DEPLOYMENT_VERIFIED: both dashboards and build manifest match", expected)
+          PY
