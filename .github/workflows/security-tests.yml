@@ -22,12 +22,8 @@ jobs:
       - name: Install Chromium for browser regression tests
         run: python -m playwright install --with-deps chromium
       - name: Build Pages artifact from this commit
-        env:
-          GITHUB_SHA: ${{ github.sha }}
         run: python build_pages.py
       - name: Test Pages artifact contract
-        env:
-          GITHUB_SHA: ${{ github.sha }}
         run: python -m unittest -v pages_artifact_tests
       - name: Validate workflow YAML and release gates
         run: python -m unittest -v workflow_validation_tests
