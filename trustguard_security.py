@@ -311,8 +311,12 @@ def verify_dpop_proof(
             expected_jkt = access_token_claims.get("cnf", {}).get("jkt") if isinstance(access_token_claims.get("cnf"), dict) else None
             if not expected_jkt or expected_jkt != thumbprint:
                 return PolicyResult(False, "DPoP key thumbprint does not match token cnf.jkt.")
-        if not replay_store.claim_once("dpop", jti, now + max_age_seconds):
-            return PolicyResult(False, "DPoP proof replay detected.")
+        try:
+            claimed = replay_store.claim_once("dpop", jti, now + max_age_seconds)
+        except Exception:
+            return PolicyResult(False, "DPoP replay storage failed closed.")
+        if not claimed:
+            return PolicyResult(False, "DPoP proof replay detected or replay storage unavailable.")
         return PolicyResult(True, "DPoP signature and proof bindings verified.")
     except (jwt.PyJWTError, TypeError, ValueError, KeyError) as exc:
         return PolicyResult(False, f"DPoP verification failed ({type(exc).__name__}).")
@@ -361,8 +365,12 @@ def authorize_delegated_transaction(
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti:
             return PolicyResult(False, "Token jti is required.")
-        if not replay_store.claim_once("kyapay", jti, token_exp):
-            return PolicyResult(False, "Token replay detected.")
+        try:
+            claimed = replay_store.claim_once("kyapay", jti, token_exp)
+        except Exception:
+            return PolicyResult(False, "Token replay storage failed closed.")
+        if not claimed:
+            return PolicyResult(False, "Token replay detected or replay storage unavailable.")
         return PolicyResult(True, "Delegation policy and token replay checks passed.")
     except (InvalidOperation, TypeError, ValueError, OverflowError):
         return PolicyResult(False, "Transaction or delegation fields are malformed.")
