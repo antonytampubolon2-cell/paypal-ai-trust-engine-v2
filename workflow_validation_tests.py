@@ -48,9 +48,10 @@ class WorkflowValidationTests(unittest.TestCase):
 
     def test_postdeploy_checks_both_dashboards_and_manifest_contract(self):
         workflow_text = (ROOT / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
-        for marker in ("dashboard.html", "dashboard_v2.html", "build-info.json",
+        for marker in ("dashboard.html", "dashboard_v2.html", "build-info.json", "hasil.json",
                        "DEPLOYMENT_NOT_VERIFIED", "UNVERIFIED_STATIC_FRONTEND",
-                       "visible.group(1) == expected", "bad_content", "bad_status"):
+                       "visible.group(1) == expected", "bad_content", "bad_status",
+                       "transaction data is not fail-closed", "forbidden legacy transaction content"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, workflow_text)
 
