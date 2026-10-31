@@ -281,12 +281,14 @@ The current implementation demonstrates several useful concepts, but it should n
 
 Known limitations include:
 
-- KYAPay verification is performed against synthetic payloads and selected claims; it is not a complete external identity-verification service.
-- Token and DPoP replay caches are in-memory and process-local.
-- The DPoP demonstration checks selected fields and JWK binding but does not verify the full DPoP proof signature.
+- The KYAPay issuer/token/delegation contract is not provided; synthetic tests do not establish official issuer interoperability.
+- SQLite replay claims are atomic and persistent only when the same database file is retained. They are not distributed multi-instance protection; production must provide a shared atomic store where needed.
+- DPoP signature and core binding checks are implemented, but full RFC 9449 interoperability, canonicalization, and issuer-specific nonce requirements remain unverified.
 - The FRP dashboard panel is not evidence of a complete backend fraud-scoring system.
-- The end-to-end workflow uses test authorization data and PayPal Sandbox.
-- Production deployment would require comprehensive validation, persistent replay protection, secure key management, robust audit logging, monitoring, rate limiting, and additional testing.
+- Tests use synthetic keys and a mocked PayPal adapter; no production integration is established.
+- Per-transaction spending limits are checked, but cumulative delegation spend is not protected by an atomic ledger/reservation.
+- Order creation has no verified idempotency guarantee. An ambiguous provider response followed by retry may risk duplicate orders.
+- Production deployment would require authoritative issuer contracts, validated merchant mapping, shared replay protection, cumulative-spend reservations, idempotency design, secure key management, audit logging, monitoring, rate limiting, and additional testing.
 
 These limitations define the current prototype scope and provide a foundation for further development.
 
@@ -319,3 +321,15 @@ This project is released under the **MIT License**. See the [`LICENSE`](LICENSE)
 - [RFC 7638 — JSON Web Key (JWK) Thumbprint](https://www.rfc-editor.org/rfc/rfc7638.html)
 
 **PayPal AI Trust Engine — Building a safer foundation for AI-driven commerce.**
+
+## Explicit transaction status contract (security review)
+
+The backend result reports these independent fields: `authentication_status`, `dpop_status`, `authorization_status`, `order_status`, and `capture_status`. The legacy `policy_status` and `delivery_status` fields remain available for compatibility.
+
+- Capture starts and remains `NOT_ATTEMPTED`; this dispatcher does not capture payments.
+- `ORDER_CREATED` means only that the order adapter returned a non-empty order identifier. It does not mean capture, settlement, fulfillment, or payment completion.
+- Authentication, DPoP, authorization, transaction validation, or replay-store failures must stop processing before the PayPal order adapter is called.
+- The current spending check is per transaction, not a cumulative grant budget. Order-creation idempotency is not implemented; retries after ambiguous provider responses are a blocker.
+- The configured KYAPay issuer, delegation schema, nonce policy, and internal-to-PayPal merchant mapping must come from authoritative sources. Do not invent them or treat synthetic test fixtures as production proof.
+
+See [SECURITY_STATUS.md](SECURITY_STATUS.md) for the current blockers. A passing mock-based test suite is evidence about local code behavior only, not a production integration certification.
