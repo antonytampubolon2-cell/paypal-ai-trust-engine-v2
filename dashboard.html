@@ -36,17 +36,17 @@
     <section class="card">
       <h2>Autentikasi</h2>
       <p>Verifikasi token dan bukti kepemilikan perlu dinilai dari hasil backend untuk setiap permintaan.</p>
-      <span class="status-unknown">UNKNOWN · BELUM TERHUBUNG</span>
+      <span class="status-unknown" id="authentication-status">UNKNOWN · BELUM TERHUBUNG</span>
     </section>
     <section class="card">
       <h2>Kebijakan</h2>
       <p>Keputusan kebijakan harus ditampilkan terpisah dari hasil autentikasi dan delivery.</p>
-      <span class="status-unknown">UNKNOWN · BELUM TERHUBUNG</span>
+      <span class="status-unknown" id="policy-status">UNKNOWN · BELUM TERHUBUNG</span>
     </section>
     <section class="card">
       <h2>Delivery</h2>
       <p>Pembuatan order tidak sama dengan pembayaran selesai, capture, settlement, atau fulfillment.</p>
-      <span class="status-unknown">UNKNOWN · BELUM TERHUBUNG</span>
+      <span class="status-unknown" id="delivery-status">UNKNOWN · BELUM TERHUBUNG</span>
     </section>
   </div>
 
@@ -58,5 +58,37 @@
   <div class="footer">PayPal AI Trust Engine — prototipe keamanan; bukan sertifikasi keamanan atau status produksi.</div>
 <p class="build-identity">Frontend build commit: <code id="build-commit">__TRUSTGUARD_BUILD_COMMIT__</code> · source identity is not transaction evidence.</p>
 </div>
+<script>
+(() => {
+  "use strict";
+  const unknown = "UNKNOWN · BELUM TERHUBUNG";
+  const setUnknown = () => {
+    document.getElementById("authentication-status").textContent = unknown;
+    document.getElementById("policy-status").textContent = unknown;
+    document.getElementById("delivery-status").textContent = unknown;
+  };
+  fetch("hasil.json", { headers: { "Accept": "application/json" } })
+    .then(response => {
+      if (!response.ok) throw new Error("Static data unavailable");
+      return response.json();
+    })
+    .then(data => {
+      const trx = data && data.transaksi_terakhir;
+      const valid = data && data.schema_version === 1 &&
+        data.source_status === "UNVERIFIED" &&
+        trx && trx.authentication_status === "UNKNOWN" &&
+        trx.policy_status === "UNKNOWN" &&
+        ["UNKNOWN", "ORDER_CREATED"].includes(trx.delivery_status) &&
+        Array.isArray(data.audit_trail);
+      if (!valid) throw new Error("Static data schema is not fail-closed");
+      document.getElementById("authentication-status").textContent = trx.authentication_status;
+      document.getElementById("policy-status").textContent = trx.policy_status;
+      document.getElementById("delivery-status").textContent = trx.delivery_status === "ORDER_CREATED"
+        ? "UNVERIFIED · ORDER_CREATED — bukan pembayaran sukses atau capture"
+        : trx.delivery_status;
+    })
+    .catch(setUnknown);
+})();
+</script>
 </body>
 </html>
