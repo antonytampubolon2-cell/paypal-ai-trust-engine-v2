@@ -1,4 +1,6 @@
 """Structural validation for GitHub Actions workflow YAML and release gates."""
+import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -65,6 +67,17 @@ class WorkflowValidationTests(unittest.TestCase):
     def test_release_repair_branch_is_in_ci_push_matrix(self):
         workflow_text = (ROOT / ".github/workflows/security-tests.yml").read_text(encoding="utf-8")
         self.assertIn("codex/pages-release-repair", workflow_text)
+
+    def test_embedded_deployment_python_scripts_are_syntactically_valid(self):
+        workflow = load_workflow(".github/workflows/deploy-pages.yml")
+        scripts = []
+        for step in workflow["jobs"]["build"]["steps"] + workflow["jobs"]["deploy"]["steps"]:
+            run = step.get("run", "")
+            scripts.extend(re.findall(r"python - <<'PY'\\n(.*?)\\nPY", run, re.S))
+        self.assertGreaterEqual(len(scripts), 2, "expected pre-deploy and post-deploy Python checks")
+        for index, script in enumerate(scripts, start=1):
+            with self.subTest(script=index):
+                ast.parse(script)
 
 
 if __name__ == "__main__":
