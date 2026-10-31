@@ -11,7 +11,9 @@ BASE_URL = os.environ.get(
     "TRUSTGUARD_PAGES_BASE_URL",
     "https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2",
 ).rstrip("/")
-EXPECTED_SHA = os.environ.get("TRUSTGUARD_EXPECTED_COMMIT_SHA", os.environ.get("GITHUB_SHA", "")).strip()
+# Only an explicit deployment-specific expectation is authoritative. GITHUB_SHA is
+# the CI/PR merge SHA during ordinary tests and must not be compared to public Pages.
+EXPECTED_SHA = os.environ.get("TRUSTGUARD_EXPECTED_COMMIT_SHA", "").strip()
 PAGES = ("dashboard.html", "dashboard_v2.html")
 FORBIDDEN_MARKERS = (
     "100%",
