@@ -26,6 +26,8 @@ jobs:
           python-version: '3.12'
       - name: Build static site with commit identity
         run: python build_pages.py
+      - name: Run full Pages artifact contract tests before upload
+        run: python -m unittest -v pages_artifact_tests
       - name: Validate build identity and content
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -39,12 +41,31 @@ jobs:
           for name in ("dashboard.html", "dashboard_v2.html"):
               text = (root / name).read_text()
               match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', text)
-              assert match and match.group(1) == expected, f"{name}: SHA mismatch"
-              assert not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\s*[:=]?\s*[^<\n]{0,30}100%", text, re.I), f"{name}: unsupported security score claim"
+              visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', text)
+              assert match and match.group(1) == expected, f"{name}: SHA metadata mismatch"
+              assert visible and visible.group(1) == expected, f"{name}: visible SHA mismatch"
+              assert "__TRUSTGUARD_BUILD_COMMIT__" not in text, f"{name}: unresolved build placeholder"
+          for name in ("dashboard.html", "dashboard_v2.html", "index.html", "build-info.json"):
+              text = (root / name).read_text()
+              assert "__TRUSTGUARD_BUILD_COMMIT__" not in text, f"{name}: unresolved build placeholder"
+          manifest = json.loads((root / "build-info.json").read_text())
+          assert manifest.get("application") == "PayPal AI Trust Engine"
+          assert manifest.get("frontend_commit") == expected
+          assert manifest.get("build_source") == "GitHub Actions checkout"
+          assert manifest.get("status") == "UNVERIFIED_STATIC_FRONTEND"
           data = json.loads((root / "hasil.json").read_text())
           assert data["source_status"] == "UNVERIFIED"
           assert data["transaksi_terakhir"]["authentication_status"] == "UNKNOWN"
           assert data["transaksi_terakhir"]["policy_status"] == "UNKNOWN"
+          assert data["transaksi_terakhir"]["delivery_status"] == "UNKNOWN"
+          forbidden = (
+              "Bukti Transaksi End-to-End (PayPal Sandbox)",
+              "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
+          )
+          combined = "\\n".join((root / name).read_text() for name in
+                                  ("dashboard.html", "dashboard_v2.html", "index.html", "hasil.json"))
+          for marker in forbidden:
+              assert marker not in combined, f"forbidden legacy content: {marker}"
           print("Pre-deploy artifact checks passed for", expected)
           PY
       - uses: actions/upload-pages-artifact@v3
@@ -82,7 +103,17 @@ jobs:
                           html = response.read().decode("utf-8", "replace")
                       match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', html)
                       got = match.group(1) if match else ""
-                      if got == expected and not re.search(r"(?:security score|tingkat keamanan|tingkat keamanan sistem)\s*[:=]?\s*[^<\n]{0,30}100%", html, re.I):
+                      forbidden = (
+                          "__TRUSTGUARD_BUILD_COMMIT__",
+                          "Bukti Transaksi End-to-End (PayPal Sandbox)",
+                          "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
+                      )
+                      bad_content = any(marker.lower() in html.lower() for marker in forbidden)
+                      bad_score = re.search(r"(?:security score|tingkat keamanan(?: sistem)?)\\s*[:=]?\\s*[^<\\n]{0,40}\\b100\\s*%", html, re.I)
+                      bad_status = re.search(r'class=["\\'][^"\\']*\\bstatus-ok\\b[^"\\']*["\\'][^>]*>\\s*(?:ACTIVE|SUCCESS|SUCCEEDED|SUKSES)\\s*<', html, re.I)
+                      visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', html)
+                      has_unknown = "UNVERIFIED" in html or "BELUM DIVERIFIKASI" in html or "BELUM TERHUBUNG" in html
+                      if got == expected and visible and visible.group(1) == expected and not bad_content and not bad_score and not bad_status and has_unknown:
                           last = ""
                           break
                       last = f"{name}: expected={expected} got={got or 'MISSING'}"
@@ -97,6 +128,8 @@ jobs:
                   manifest = json.loads(response.read().decode("utf-8"))
               if manifest.get("frontend_commit") != expected:
                   errors.append(f"build-info.json: expected={expected} got={manifest.get('frontend_commit', 'MISSING')}")
+              if manifest.get("application") != "PayPal AI Trust Engine" or manifest.get("build_source") != "GitHub Actions checkout" or manifest.get("status") != "UNVERIFIED_STATIC_FRONTEND":
+                  errors.append("build-info.json: required manifest fields do not match the release contract")
           except Exception as exc:
               errors.append(f"build-info.json: {type(exc).__name__}: {exc}")
           if errors:
