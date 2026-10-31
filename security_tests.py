@@ -313,13 +313,14 @@ class SecurityTests(unittest.TestCase):
         restarted=SQLiteReplayStore(path)
         self.assertFalse(restarted.claim_once("kyapay","restart-token-jti",expires))
 
-    def test_order_failure_does_not_claim_capture_success(self):
+    def test_ambiguous_order_transport_failure_is_unknown_not_failed(self):
         token,proof=self.signed_request()
-        mock=self.MockPayPal(error=RuntimeError("synthetic provider failure"))
+        # A transport exception may happen after the provider accepted the request.
+        mock=self.MockPayPal(error=TimeoutError("synthetic ambiguous provider timeout"))
         result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
-        self.assertEqual(result.order_status,"FAILED")
+        self.assertEqual(result.order_status,"UNKNOWN")
         self.assertEqual(result.capture_status,"NOT_ATTEMPTED")
         self.assertEqual(len(mock.calls),1)
         self.assertEqual(mock.calls[0]["method"],"create_order")
