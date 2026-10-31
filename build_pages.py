@@ -7,10 +7,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "_site"
-SHA = os.environ.get("GITHUB_SHA", "").strip() or subprocess.check_output(
+CHECKED_OUT_SHA = subprocess.check_output(
     ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
 ).strip()
-if len(SHA) != 40 or any(ch not in "0123456789abcdef" for ch in SHA.lower()):
+ENV_SHA = os.environ.get("GITHUB_SHA", "").strip()
+if ENV_SHA and ENV_SHA != CHECKED_OUT_SHA:
+    raise SystemExit(
+        "Refusing build: GITHUB_SHA does not match the checked-out commit "
+        f"({ENV_SHA!r} != {CHECKED_OUT_SHA!r})"
+    )
+SHA = ENV_SHA or CHECKED_OUT_SHA
+if len(SHA) != 40 or any(ch not in "0123456789abcdef" for ch in SHA):
     raise SystemExit(f"Refusing build: invalid commit SHA {SHA!r}")
 
 if OUT.exists():
