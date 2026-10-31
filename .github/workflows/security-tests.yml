@@ -16,3 +16,6 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r requirements-security.txt
       - run: python -m unittest -v security_tests
+
+      - name: PayPal REST item schema tests
+        run: python -m unittest -v paypal_rest_tests
