@@ -62,7 +62,7 @@ jobs:
               "Bukti Transaksi End-to-End (PayPal Sandbox)",
               "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
           )
-          combined = "\\n".join((root / name).read_text() for name in
+          combined = "\n".join((root / name).read_text() for name in
                                   ("dashboard.html", "dashboard_v2.html", "index.html", "hasil.json"))
           for marker in forbidden:
               assert marker not in combined, f"forbidden legacy content: {marker}"
@@ -109,8 +109,8 @@ jobs:
                           "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
                       )
                       bad_content = any(marker.lower() in html.lower() for marker in forbidden)
-                      bad_score = re.search(r"(?:security score|tingkat keamanan(?: sistem)?)\\s*[:=]?\\s*[^<\\n]{0,40}\\b100\\s*%", html, re.I)
-                      bad_status = re.search(r'class=["\\'][^"\\']*\\bstatus-ok\\b[^"\\']*["\\'][^>]*>\\s*(?:ACTIVE|SUCCESS|SUCCEEDED|SUKSES)\\s*<', html, re.I)
+                      bad_score = re.search(r"(?:security score|tingkat keamanan(?: sistem)?)\s*[:=]?\s*[^<\n]{0,40}\b100\s*%", html, re.I)
+                      bad_status = re.search(r"""class=["'][^"']*\bstatus-ok\b[^"']*["'][^>]*>\s*(?:ACTIVE|SUCCESS|SUCCEEDED|SUKSES)\s*<""", html, re.I)
                       visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', html)
                       has_unknown = "UNVERIFIED" in html or "BELUM DIVERIFIKASI" in html or "BELUM TERHUBUNG" in html
                       if got == expected and visible and visible.group(1) == expected and not bad_content and not bad_score and not bad_status and has_unknown:
