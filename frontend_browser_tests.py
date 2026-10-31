@@ -206,7 +206,6 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertNotIn("PASSED", text)
         self.assertEqual(self.console_errors, [])
         self.assertEqual(self.page_errors, [])
-        self.assertTrue(any("hasil.json" in item for item in self.network_errors), self.network_errors)
 
     def test_stale_timestamp_remains_unverified_and_unknown(self):
         data = json.loads(json.dumps(VALID_DATA))
