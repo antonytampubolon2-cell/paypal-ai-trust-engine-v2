@@ -196,12 +196,7 @@ class DashboardBrowserTests(unittest.TestCase):
     def test_fetch_failure_fails_closed(self):
         self.page.route("**/build-info.json", lambda route: route.fulfill(
             status=200, content_type="application/json",
-            body=json.dumps({
-                "application": "PayPal AI Trust Engine",
-                "frontend_commit": "a" * 40,
-                "build_source": "GitHub Actions checkout",
-                "status": "UNVERIFIED_STATIC_FRONTEND",
-            }),
+            body=(ROOT / "_site" / "build-info.json").read_text(encoding="utf-8"),
         ))
         self.page.route("**/hasil.json", lambda route: route.abort())
         self.page.goto(f"{self.base_url}/dashboard_v2.html", wait_until="networkidle")
@@ -209,7 +204,9 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertIn("Semua status harus dianggap UNKNOWN", text)
         self.assertIn("Data tidak tersedia.", text)
         self.assertNotIn("PASSED", text)
-        self.assert_no_runtime_errors()
+        self.assertEqual(self.console_errors, [])
+        self.assertEqual(self.page_errors, [])
+        self.assertTrue(any("hasil.json" in item for item in self.network_errors), self.network_errors)
 
     def test_stale_timestamp_remains_unverified_and_unknown(self):
         data = json.loads(json.dumps(VALID_DATA))
