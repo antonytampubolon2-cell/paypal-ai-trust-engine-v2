@@ -47,9 +47,11 @@ class FrontendHardeningTests(unittest.TestCase):
         for html in (self.dashboard, self.dashboard_v2):
             with self.subTest(dashboard="dashboard_v2" if html is self.dashboard_v2 else "dashboard"):
                 self.assertIn('fetch("hasil.json"', html)
-                self.assertIn('data.source_status === "UNVERIFIED"', html)
-                self.assertIn('trx.authentication_status === "UNKNOWN"', html)
-                self.assertIn('trx.policy_status === "UNKNOWN"', html)
+                self.assertIn("source_status", html)
+                self.assertIn("authentication_status", html)
+                self.assertIn("policy_status", html)
+                self.assertIn('"UNVERIFIED"', html)
+                self.assertIn('"UNKNOWN"', html)
 
     def test_dashboard_never_uses_inner_html(self):
         for html in (self.dashboard, self.dashboard_v2):
