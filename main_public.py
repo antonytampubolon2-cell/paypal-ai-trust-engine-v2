@@ -100,8 +100,10 @@ def process_payment_request(
             "PayPal order was created; capture was not attempted and payment is not confirmed.",
         )
     except Exception:
-        # Do not return raw provider exceptions or secrets to callers.
-        return result("PASSED", "PASSED", "PASSED", "FAILED", "PayPal order creation failed; provider details were redacted.")
+        # A timeout or transport error may occur after the provider accepted the
+        # request. Without a verified idempotency/reconciliation contract, report
+        # an ambiguous outcome and never imply that no order was created.
+        return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "PayPal order outcome is unknown; provider details were redacted. Do not retry automatically.")
 
 
 def main() -> int:
