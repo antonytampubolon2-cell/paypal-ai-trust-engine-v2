@@ -93,7 +93,7 @@ def normalize_rest_items(
             entry["sku"] = sku
         category = item.get("category")
         if category is not None:
-            if category not in allowed_categories:
+            if not isinstance(category, str) or category not in allowed_categories:
                 raise RestItemValidationError(f"rest_items[{index}].category is invalid.")
             entry["category"] = category
         normalized.append(entry)
