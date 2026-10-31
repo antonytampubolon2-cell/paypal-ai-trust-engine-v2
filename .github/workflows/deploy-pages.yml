@@ -156,25 +156,38 @@ jobs:
               time.sleep(10)
           if index_error:
               errors.append(index_error)
-          try:
-              req = urllib.request.Request(base + "/hasil.json", headers={"Cache-Control": "no-cache", "Accept": "application/json"})
-              with urllib.request.urlopen(req, timeout=15) as response:
-                  data = json.loads(response.read().decode("utf-8"))
-              trx = data.get("transaksi_terakhir", {})
-              if data.get("source_status") != "UNVERIFIED" or data.get("timestamp") is not None:
-                  errors.append("hasil.json: source must remain UNVERIFIED with no timestamp")
-              if (trx.get("order_id") is not None or trx.get("merchant") is not None or trx.get("total") is not None
-                      or trx.get("authentication_status") != "UNKNOWN"
-                      or trx.get("policy_status") != "UNKNOWN"
-                      or trx.get("delivery_status") != "UNKNOWN"
-                      or data.get("audit_trail") != []):
-                  errors.append("hasil.json: transaction data is not fail-closed")
-              forbidden_data = ("7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
-                                "Bukti Transaksi End-to-End (PayPal Sandbox)")
-              if any(marker in json.dumps(data) for marker in forbidden_data):
-                  errors.append("hasil.json: forbidden legacy transaction content detected")
-          except Exception as exc:
-              errors.append(f"hasil.json: {type(exc).__name__}: {exc}")
+          data_error = "hasil.json: no response"
+          for attempt in range(8):
+              try:
+                  req = urllib.request.Request(base + "/hasil.json", headers={"Cache-Control": "no-cache", "Accept": "application/json"})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      data = json.loads(response.read().decode("utf-8"))
+                  trx = data.get("transaksi_terakhir", {})
+                  valid_data = (
+                      data.get("schema_version") == 1
+                      and data.get("source_status") == "UNVERIFIED"
+                      and data.get("timestamp") is None
+                      and data.get("audit_trail") == []
+                      and trx.get("order_id") is None
+                      and trx.get("merchant") is None
+                      and trx.get("total") is None
+                      and trx.get("authentication_status") == "UNKNOWN"
+                      and trx.get("policy_status") == "UNKNOWN"
+                      and trx.get("delivery_status") == "UNKNOWN"
+                  )
+                  forbidden_data = (
+                      "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
+                      "Bukti Transaksi End-to-End (PayPal Sandbox)",
+                  )
+                  if valid_data and not any(marker in json.dumps(data) for marker in forbidden_data):
+                      data_error = ""
+                      break
+                  data_error = "hasil.json: transaction data is not fail-closed"
+              except Exception as exc:
+                  data_error = f"hasil.json: {type(exc).__name__}: {exc}"
+              time.sleep(10)
+          if data_error:
+              errors.append(data_error)
           if errors:
               raise SystemExit("DEPLOYMENT_NOT_VERIFIED: " + "; ".join(errors))
           print("DEPLOYMENT_VERIFIED: both dashboards and build manifest match", expected)
