@@ -95,7 +95,16 @@ class SecurityTests(unittest.TestCase):
             def __init__(self): self.calls=[]
             def run(self,**kwargs): self.calls.append(kwargs); return {"id":"MOCK-ORDER"}
         mock=MockPayPal()
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay",merchant_mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"})
+        result=process_payment_request(
+            compact_token=token, compact_dpop_proof=proof,
+            transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},
+            replay_store=self.store, paypal_api=mock, expected_url="https://example.test/pay",
+            merchant_mapping={"merchant-1":"PAYPAL-MERCHANT-VERIFIED"},
+            rest_items=[
+                {"name":"Line item A","quantity":"1","unit_amount":{"currency_code":"USD","value":"10.00"}},
+                {"name":"Line item B","quantity":"1","unit_amount":{"currency_code":"USD","value":"2.34"}},
+            ],
+        )
         self.assertEqual((result.authentication_status,result.policy_status,result.delivery_status),("PASSED","PASSED","ORDER_CREATED"))
         # Creating an order is not proof of a completed payment or capture.
         self.assertNotEqual(result.delivery_status,"SUCCEEDED")
@@ -114,6 +123,13 @@ class SecurityTests(unittest.TestCase):
             "value":canonical.amount_text,
         })
         self.assertEqual(payload["description"],canonical.description)
+        self.assertEqual(payload["amount"]["breakdown"]["item_total"], {
+            "currency_code": "USD", "value": "12.34"
+        })
+        self.assertEqual(
+            sum(Decimal(item["unit_amount"]["value"]) * int(item["quantity"]) for item in payload["items"]),
+            canonical.amount,
+        )
 
 
     def test_canonical_amount_rejects_excess_precision_and_invalid_values(self):
