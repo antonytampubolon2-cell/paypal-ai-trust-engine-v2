@@ -3,7 +3,7 @@ on:
   pull_request:
     branches: [main, codex/security-hardening]
   push:
-    branches: [codex/security-hardening, codex/frontend-hardening, codex/pages-release-repair]
+    branches: [codex/security-hardening, codex/frontend-hardening, codex/pages-release-repair, codex/pages-release-audit-stage-5-2]
 permissions:
   contents: read
 jobs:
