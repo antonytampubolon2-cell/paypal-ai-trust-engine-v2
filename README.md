@@ -333,3 +333,10 @@ The backend result reports these independent fields: `authentication_status`, `d
 - The configured KYAPay issuer, delegation schema, nonce policy, and internal-to-PayPal merchant mapping must come from authoritative sources. Do not invent them or treat synthetic test fixtures as production proof.
 
 See [SECURITY_STATUS.md](SECURITY_STATUS.md) for the current blockers. A passing mock-based test suite is evidence about local code behavior only, not a production integration certification.
+
+
+## Repository compatibility audit
+
+Stage 4 inventory and call-site findings are recorded in [`COMPATIBILITY_AUDIT.md`](COMPATIBILITY_AUDIT.md). The current backend contract is keyword-only `process_payment_request(...)`; callers must provide the token, DPoP proof, transaction, replay store, and expected URL explicitly. The old `execute_safe_payment()` symbol is not present in this repository, and no in-repository dependency on it was found. No insecure legacy adapter is provided.
+
+The dashboard reads static `hasil.json` and is not connected to authenticated backend telemetry. Its `UNVERIFIED` source and `UNKNOWN` transaction statuses are not evidence of an authenticated or completed payment. The only runtime order-dispatch call is the injected adapter call after the security gates; this prototype does not capture payments.
