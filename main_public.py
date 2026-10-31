@@ -5,11 +5,12 @@ No issuer trust material is bundled: configure it from the official KYAPay issue
 """
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any, Mapping
 
 from trustguard_security import (
     PaymentResult,
+    CanonicalTransaction,
+    canonicalize_transaction,
     ReplayStore,
     authenticate_kyapay_jwt,
     authorize_delegated_transaction,
@@ -26,6 +27,7 @@ def process_payment_request(
     paypal_api: Any | None = None,
     expected_method: str = "POST",
     expected_url: str,
+    merchant_mapping: Mapping[str, str] | None = None,
 ) -> PaymentResult:
     """Authenticate, authorize, and optionally dispatch the exact checked transaction.
 
@@ -48,7 +50,13 @@ def process_payment_request(
     if not dpop.allowed:
         return PaymentResult("PASSED", "FAILED", "NOT_ATTEMPTED", dpop.reason)
 
-    policy = authorize_delegated_transaction(auth.claims, transaction, replay_store)
+    # Validate once, then carry the frozen canonical object through policy and payload.
+    try:
+        canonical = canonicalize_transaction(transaction, merchant_mapping=merchant_mapping or {})
+    except (ValueError, TypeError):
+        return PaymentResult("PASSED", "FAILED", "NOT_ATTEMPTED", "Transaction validation failed closed.")
+
+    policy = authorize_delegated_transaction(auth.claims, canonical, replay_store)
     if not policy.allowed:
         return PaymentResult("PASSED", "FAILED", "NOT_ATTEMPTED", policy.reason)
 
@@ -56,15 +64,12 @@ def process_payment_request(
         return PaymentResult("PASSED", "PASSED", "NOT_ATTEMPTED", "No PayPal adapter supplied.")
 
     # Build the outbound order amount/currency from the same checked canonical object.
-    amount = Decimal(str(transaction["amount"]))
-    currency = str(transaction["currency"])
-    merchant_id = str(transaction["merchant"])
     params = {
         "intent": "AUTHORIZE",
         "purchase_units": [{
-            "payee": {"merchant_id": merchant_id},
-            "amount": {"currency_code": currency, "value": format(amount, ".2f")},
-            "description": str(transaction.get("description", "Authorized transaction")),
+            "payee": {"merchant_id": canonical.paypal_merchant_id},
+            "amount": {"currency_code": canonical.currency, "value": canonical.amount_text},
+            "description": canonical.description,
         }],
     }
     try:
