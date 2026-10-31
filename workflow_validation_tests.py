@@ -32,6 +32,28 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertIn("trustguard-build-commit", workflow_text)
         self.assertIn("DEPLOYMENT_NOT_VERIFIED", workflow_text)
 
+    def test_deployment_permissions_and_predeploy_gates_are_least_privilege(self):
+        workflow = load_workflow(".github/workflows/deploy-pages.yml")
+        self.assertEqual(workflow["permissions"]["contents"], "read")
+        self.assertEqual(workflow["jobs"]["deploy"]["permissions"]["pages"], "write")
+        self.assertEqual(workflow["jobs"]["deploy"]["permissions"]["id-token"], "write")
+        self.assertNotIn("pages", workflow["jobs"]["build"].get("permissions", {}))
+        workflow_text = (ROOT / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
+        self.assertIn("Run full Pages artifact contract tests before upload", workflow_text)
+        self.assertIn("upload-pages-artifact", workflow_text)
+        self.assertLess(workflow_text.index("pages_artifact_tests"), workflow_text.index("upload-pages-artifact"))
+        for marker in ("__TRUSTGUARD_BUILD_COMMIT__", "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, workflow_text)
+
+    def test_postdeploy_checks_both_dashboards_and_manifest_contract(self):
+        workflow_text = (ROOT / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
+        for marker in ("dashboard.html", "dashboard_v2.html", "build-info.json",
+                       "DEPLOYMENT_NOT_VERIFIED", "UNVERIFIED_STATIC_FRONTEND",
+                       "visible.group(1) == expected", "bad_content", "bad_status"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, workflow_text)
+
     def test_security_workflow_runs_all_required_test_groups(self):
         workflow = load_workflow(".github/workflows/security-tests.yml")
         commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["test"]["steps"])
