@@ -73,7 +73,7 @@ class WorkflowValidationTests(unittest.TestCase):
         scripts = []
         for step in workflow["jobs"]["build"]["steps"] + workflow["jobs"]["deploy"]["steps"]:
             run = step.get("run", "")
-            scripts.extend(re.findall(r"python - <<'PY'\\n(.*?)\\nPY", run, re.S))
+            scripts.extend(re.findall(r"python - <<'PY'\n(.*?)\nPY", run, re.S))
         self.assertGreaterEqual(len(scripts), 2, "expected pre-deploy and post-deploy Python checks")
         for index, script in enumerate(scripts, start=1):
             with self.subTest(script=index):
