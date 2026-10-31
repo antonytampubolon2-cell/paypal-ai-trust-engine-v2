@@ -40,7 +40,7 @@ class ReleasePipelineTests(unittest.TestCase):
     def test_public_verification_checks_manifest_index_dashboards_and_data(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         for marker in ("dashboard.html", "dashboard_v2.html", "index.html", "build-info.json",
-                       "hasil.json", "DEPLOYMENT_NOT_VERIFIED", "UNVERIFIED_STATIC_FRONTEND",
+                       "hasil.json", "DEPLOYMENT_NOT_VERIFIED", "UNVERIFIED_STATIC_FRONTEND", "data_error",
                        "visible.group(1) == expected", "manifest_error", "index_error"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
