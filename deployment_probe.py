@@ -86,9 +86,16 @@ def main():
             manifest = json.loads(response.read().decode("utf-8"))
         manifest_sha = manifest.get("frontend_commit", "")
         manifest_ok = bool(re.fullmatch(r"[0-9a-f]{40}", manifest_sha))
+        dashboard_sha = next(iter(shas)) if consistent else ""
+        manifest_ok = manifest_ok and bool(dashboard_sha) and manifest_sha == dashboard_sha
         if EXPECTED_SHA:
             manifest_ok = manifest_ok and manifest_sha == EXPECTED_SHA
-        print(f"LIVE_PROBE manifest_sha={manifest_sha or 'MISSING'} expected_sha={EXPECTED_SHA or 'NOT_SET'} verdict={'MANIFEST_VERIFIED' if manifest_ok else 'MANIFEST_NOT_VERIFIED'}")
+        print(
+            f"LIVE_PROBE manifest_sha={manifest_sha or 'MISSING'} "
+            f"dashboard_sha={dashboard_sha or 'INCONSISTENT_OR_MISSING'} "
+            f"expected_sha={EXPECTED_SHA or 'NOT_SET'} "
+            f"verdict={'MANIFEST_VERIFIED' if manifest_ok else 'MANIFEST_NOT_VERIFIED'}"
+        )
     except Exception as exc:
         manifest_ok = False
         print(f"LIVE_PROBE manifest_sha=MISSING verdict=MANIFEST_NOT_VERIFIED error={type(exc).__name__}: {exc}")
