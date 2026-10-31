@@ -85,6 +85,8 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertNotIn("TRUSTGUARD_EXPECTED_COMMIT_SHA", probe.get("env", {}))
         probe_text = (ROOT / "deployment_probe.py").read_text(encoding="utf-8")
         self.assertIn("manifest_sha == dashboard_sha", probe_text)
+        self.assertIn('os.environ.get("TRUSTGUARD_EXPECTED_COMMIT_SHA", "").strip()', probe_text)
+        self.assertNotIn('os.environ.get("GITHUB_SHA", "")', probe_text)
         self.assertIn("DASHBOARD_VERSION_MISMATCH", probe_text)
 
     def test_embedded_deployment_python_scripts_are_syntactically_valid(self):
