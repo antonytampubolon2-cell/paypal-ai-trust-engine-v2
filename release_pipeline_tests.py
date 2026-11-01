@@ -30,6 +30,7 @@ class ReleasePipelineTests(unittest.TestCase):
     def test_least_privilege_and_artifact_gate_order(self):
         workflow = load_workflow()
         self.assertEqual(workflow["permissions"]["contents"], "read")
+        self.assertEqual(workflow["jobs"]["deploy"]["permissions"]["actions"], "read")
         self.assertEqual(workflow["jobs"]["deploy"]["permissions"]["pages"], "write")
         self.assertEqual(workflow["jobs"]["deploy"]["permissions"]["id-token"], "write")
         self.assertNotIn("pages", workflow["jobs"]["build"].get("permissions", {}))
