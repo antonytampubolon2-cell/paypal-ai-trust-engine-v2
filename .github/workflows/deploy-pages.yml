@@ -1,0 +1,195 @@
+name: Deploy verified frontend to GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: "Type DEPLOY_TO_PRODUCTION to authorize publishing from main"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_production_deploy == 'DEPLOY_TO_PRODUCTION'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Build static site with commit identity
+        run: python build_pages.py
+      - name: Run full Pages artifact contract tests before upload
+        run: python -m unittest -v pages_artifact_tests
+      - name: Validate build identity and content
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path("_site")
+          expected = os.environ["EXPECTED_SHA"]
+          manifest = json.loads((root / "build-info.json").read_text())
+          assert manifest["frontend_commit"] == expected, "build manifest SHA mismatch"
+          for name in ("dashboard.html", "dashboard_v2.html"):
+              text = (root / name).read_text()
+              match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', text)
+              visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', text)
+              assert match and match.group(1) == expected, f"{name}: SHA metadata mismatch"
+              assert visible and visible.group(1) == expected, f"{name}: visible SHA mismatch"
+              assert "__TRUSTGUARD_BUILD_COMMIT__" not in text, f"{name}: unresolved build placeholder"
+          for name in ("dashboard.html", "dashboard_v2.html", "index.html", "build-info.json"):
+              text = (root / name).read_text()
+              assert "__TRUSTGUARD_BUILD_COMMIT__" not in text, f"{name}: unresolved build placeholder"
+          manifest = json.loads((root / "build-info.json").read_text())
+          assert manifest.get("application") == "PayPal AI Trust Engine"
+          assert manifest.get("frontend_commit") == expected
+          assert manifest.get("build_source") == "GitHub Actions checkout"
+          assert manifest.get("status") == "UNVERIFIED_STATIC_FRONTEND"
+          data = json.loads((root / "hasil.json").read_text())
+          assert data["source_status"] == "UNVERIFIED"
+          assert data["transaksi_terakhir"]["authentication_status"] == "UNKNOWN"
+          assert data["transaksi_terakhir"]["policy_status"] == "UNKNOWN"
+          assert data["transaksi_terakhir"]["delivery_status"] == "UNKNOWN"
+          forbidden = (
+              "Bukti Transaksi End-to-End (PayPal Sandbox)",
+              "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
+          )
+          combined = "\n".join((root / name).read_text() for name in
+                                  ("dashboard.html", "dashboard_v2.html", "index.html", "hasil.json"))
+          for marker in forbidden:
+              assert marker not in combined, f"forbidden legacy content: {marker}"
+          print("Pre-deploy artifact checks passed for", expected)
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify public pages identify this exact commit
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          BASE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          python - <<'PY'
+          import os, time, urllib.request, re, json
+          base, expected = os.environ["BASE_URL"].rstrip("/"), os.environ["EXPECTED_SHA"]
+          errors = []
+          for name in ("dashboard.html", "dashboard_v2.html"):
+              last = ""
+              for attempt in range(8):
+                  try:
+                      req = urllib.request.Request(base + "/" + name, headers={"Cache-Control": "no-cache"})
+                      with urllib.request.urlopen(req, timeout=15) as response:
+                          html = response.read().decode("utf-8", "replace")
+                      match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', html)
+                      got = match.group(1) if match else ""
+                      forbidden = (
+                          "__TRUSTGUARD_BUILD_COMMIT__",
+                          "Bukti Transaksi End-to-End (PayPal Sandbox)",
+                          "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
+                      )
+                      bad_content = any(marker.lower() in html.lower() for marker in forbidden)
+                      bad_score = re.search(r"(?:security score|tingkat keamanan(?: sistem)?)\s*[:=]?\s*[^<\n]{0,40}\b100\s*%", html, re.I)
+                      bad_status = re.search(r"""class=["'][^"']*\bstatus-ok\b[^"']*["'][^>]*>\s*(?:ACTIVE|SUCCESS|SUCCEEDED|SUKSES)\s*<""", html, re.I)
+                      visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', html)
+                      has_unknown = "UNVERIFIED" in html or "BELUM DIVERIFIKASI" in html or "BELUM TERHUBUNG" in html
+                      if got == expected and visible and visible.group(1) == expected and not bad_content and not bad_score and not bad_status and has_unknown:
+                          last = ""
+                          break
+                      last = f"{name}: expected={expected} got={got or 'MISSING'}"
+                  except Exception as exc:
+                      last = f"{name}: {type(exc).__name__}: {exc}"
+                  time.sleep(10)
+              if last:
+                  errors.append(last)
+          manifest = None
+          manifest_error = "build-info.json: no response"
+          for attempt in range(8):
+              try:
+                  req = urllib.request.Request(base + "/build-info.json", headers={"Cache-Control": "no-cache", "Accept": "application/json"})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      manifest = json.loads(response.read().decode("utf-8"))
+                  if manifest.get("frontend_commit") == expected and manifest.get("application") == "PayPal AI Trust Engine" and manifest.get("build_source") == "GitHub Actions checkout" and manifest.get("status") == "UNVERIFIED_STATIC_FRONTEND":
+                      manifest_error = ""
+                      break
+                  manifest_error = f"build-info.json: expected={expected} got={manifest.get('frontend_commit', 'MISSING')}"
+              except Exception as exc:
+                  manifest_error = f"build-info.json: {type(exc).__name__}: {exc}"
+              time.sleep(10)
+          if manifest_error:
+              errors.append(manifest_error)
+
+          index_error = "index.html: no response"
+          for attempt in range(8):
+              try:
+                  req = urllib.request.Request(base + "/index.html", headers={"Cache-Control": "no-cache"})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      index_html = response.read().decode("utf-8", "replace")
+                  meta = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', index_html)
+                  visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', index_html)
+                  if meta and visible and meta.group(1) == expected and visible.group(1) == expected:
+                      index_error = ""
+                      break
+                  index_error = f"index.html: expected={expected} got={meta.group(1) if meta else 'MISSING'}"
+              except Exception as exc:
+                  index_error = f"index.html: {type(exc).__name__}: {exc}"
+              time.sleep(10)
+          if index_error:
+              errors.append(index_error)
+          data_error = "hasil.json: no response"
+          for attempt in range(8):
+              try:
+                  req = urllib.request.Request(base + "/hasil.json", headers={"Cache-Control": "no-cache", "Accept": "application/json"})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      data = json.loads(response.read().decode("utf-8"))
+                  trx = data.get("transaksi_terakhir", {})
+                  valid_data = (
+                      data.get("schema_version") == 1
+                      and data.get("source_status") == "UNVERIFIED"
+                      and data.get("timestamp") is None
+                      and data.get("audit_trail") == []
+                      and trx.get("order_id") is None
+                      and trx.get("merchant") is None
+                      and trx.get("total") is None
+                      and trx.get("authentication_status") == "UNKNOWN"
+                      and trx.get("policy_status") == "UNKNOWN"
+                      and trx.get("delivery_status") == "UNKNOWN"
+                  )
+                  forbidden_data = (
+                      "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
+                      "Bukti Transaksi End-to-End (PayPal Sandbox)",
+                  )
+                  if valid_data and not any(marker in json.dumps(data) for marker in forbidden_data):
+                      data_error = ""
+                      break
+                  data_error = "hasil.json: transaction data is not fail-closed"
+              except Exception as exc:
+                  data_error = f"hasil.json: {type(exc).__name__}: {exc}"
+              time.sleep(10)
+          if data_error:
+              errors.append(data_error)
+          if errors:
+              raise SystemExit("DEPLOYMENT_NOT_VERIFIED: " + "; ".join(errors))
+          print("DEPLOYMENT_VERIFIED: both dashboards and build manifest match", expected)
+          PY
