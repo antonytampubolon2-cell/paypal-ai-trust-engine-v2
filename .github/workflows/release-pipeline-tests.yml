@@ -24,6 +24,8 @@ jobs:
         run: python build_pages.py
       - name: Validate release gates
         run: python -m unittest -v release_pipeline_tests
+      - name: Validate frontend contract
+        run: python -m unittest -v frontend_tests
       - name: Validate Pages artifact
         run: python -m unittest -v pages_artifact_tests
       - name: Validate dashboard behavior
