@@ -99,8 +99,8 @@ class ReleasePipelineTests(unittest.TestCase):
         seen = set()
         for workflow in workflows:
             for line in workflow.read_text(encoding="utf-8").splitlines():
-                if re.match(r"^\s*uses\s*:", line):
-                    match = re.match(r"^\s*uses\s*:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s*$", line)
+                if re.match(r"^\s*(?:-\s*)?uses\s*:", line):
+                    match = re.match(r"^\s*(?:-\s*)?uses\s*:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s*$", line)
                     self.assertIsNotNone(match, f"{workflow.name}: action must use an immutable 40-character SHA: {line.strip()}")
                     action, sha = match.groups()
                     seen.add(action)
