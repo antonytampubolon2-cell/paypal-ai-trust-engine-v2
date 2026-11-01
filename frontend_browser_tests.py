@@ -207,14 +207,20 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertEqual(self.page_errors, [])
         self.assertTrue(any("ERR_FAILED" in item for item in self.console_errors), self.console_errors)
 
-    def test_stale_timestamp_remains_unverified_and_unknown(self):
+    def test_stale_timestamp_fails_closed_and_suppresses_transaction_data(self):
         data = json.loads(json.dumps(VALID_DATA))
         data["timestamp"] = "2000-01-01T00:00:00Z"
+        data["transaksi_terakhir"]["order_id"] = "STALE-ORDER-SHOULD-NOT-RENDER"
+        data["transaksi_terakhir"]["merchant"] = "STALE-MERCHANT"
+        data["transaksi_terakhir"]["total"] = "999.99"
         self.open_v2(json.dumps(data))
         text = self.page.locator("body").inner_text()
-        self.assertIn("UNVERIFIED", text)
-        self.assertIn("Timestamp file (belum diverifikasi)", text)
-        self.assertGreaterEqual(text.count("UNKNOWN"), 3)
+        self.assertIn("Semua status harus dianggap UNKNOWN", text)
+        self.assertIn("Data tidak tersedia.", text)
+        self.assertNotIn("STALE-ORDER-SHOULD-NOT-RENDER", text)
+        self.assertNotIn("STALE-MERCHANT", text)
+        self.assertNotIn("999.99", text)
+        self.assertIn("UNKNOWN", text)
         self.assertNotIn("SUCCESS", text)
         self.assertNotIn("PASSED", text)
         self.assert_no_runtime_errors()
@@ -242,15 +248,92 @@ class DashboardBrowserTests(unittest.TestCase):
     def test_xss_payloads_render_as_text_and_do_not_create_elements_or_execute(self):
         data = json.loads(json.dumps(VALID_DATA))
         payload = '<img src=x onerror="window.__xss=1"><script>window.__xss=2</script>'
+        data["timestamp"] = "2026-11-01T00:00:00Z"
         data["transaksi_terakhir"]["order_id"] = payload
         data["transaksi_terakhir"]["merchant"] = payload
-        data["audit_trail"] = [{"waktu": payload, "event": payload, "hasil": payload}]
+        data["audit_trail"] = [{"waktu": "2026-11-01T00:00:00Z", "event": "<script>window.__xss=2</script>", "hasil": "UNKNOWN"}]
         self.open_v2(json.dumps(data))
         self.assertEqual(self.page.evaluate("window.__xss"), 0)
         self.assertEqual(self.page.locator("#transaksi-area img, #transaksi-area script").count(), 0)
         self.assertEqual(self.page.locator("#audit-area img, #audit-area script").count(), 0)
         self.assertIn("<img src=x", self.page.locator("#transaksi-area").inner_text())
         self.assertIn("<script>", self.page.locator("#audit-area").inner_text())
+        self.assert_no_runtime_errors()
+
+    def test_audit_result_cannot_spoof_verified_status(self):
+        data = json.loads(json.dumps(VALID_DATA))
+        data["timestamp"] = "2026-10-31T12:00:00Z"
+        data["audit_trail"] = [{"waktu": "2026-10-31T12:00:00Z", "event": "token check", "hasil": "VERIFIED"}]
+        self.open_v2(json.dumps(data))
+        text = self.page.locator("body").inner_text()
+        self.assertIn("Data tidak tersedia.", text)
+        self.assertNotIn("VERIFIED", text)
+        self.assert_no_runtime_errors()
+
+    def test_both_dashboards_reject_manifest_sha_mismatch(self):
+        self.page.route("**/build-info.json", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "application": "PayPal AI Trust Engine",
+                "frontend_commit": "0" * 40,
+                "build_source": "GitHub Actions checkout",
+                "status": "UNVERIFIED_STATIC_FRONTEND",
+            }),
+        ))
+        for filename in ("dashboard.html", "dashboard_v2.html"):
+            with self.subTest(filename=filename):
+                self.page.goto(f"{self.base_url}/{filename}", wait_until="networkidle")
+                text = self.page.locator("body").inner_text()
+                self.assertIn("UNKNOWN", text)
+                self.assertNotIn("PASSED", text)
+                self.assert_no_runtime_errors()
+
+    def test_stale_and_future_data_fail_closed_on_both_dashboards(self):
+        stale = json.loads(json.dumps(VALID_DATA))
+        stale["timestamp"] = "2000-01-01T00:00:00Z"
+        stale["transaksi_terakhir"]["order_id"] = "STALE-ORDER-DO-NOT-RENDER"
+        future = json.loads(json.dumps(VALID_DATA))
+        future["timestamp"] = "2099-01-01T00:00:00Z"
+        for filename, data in (("dashboard.html", stale), ("dashboard_v2.html", stale),
+                               ("dashboard_v2.html", future)):
+            with self.subTest(filename=filename, timestamp=data["timestamp"]):
+                self.page.route("**/hasil.json", lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(data)
+                ))
+                self.page.goto(f"{self.base_url}/{filename}", wait_until="networkidle")
+                text = self.page.locator("body").inner_text()
+                self.assertIn("UNKNOWN", text)
+                self.assertNotIn("STALE-ORDER-DO-NOT-RENDER", text)
+                self.assertNotIn("PASSED", text)
+                self.assert_no_runtime_errors()
+
+    def test_hanging_data_fetch_times_out_and_fails_closed(self):
+        self.page.add_init_script("""
+            const realFetch = window.fetch.bind(window);
+            window.fetch = (resource, options = {}) => {
+              if (String(resource).includes("hasil.json")) {
+                return new Promise((resolve, reject) => {
+                  const signal = options.signal;
+                  if (signal && signal.aborted) {
+                    reject(new DOMException("aborted", "AbortError"));
+                    return;
+                  }
+                  if (signal) signal.addEventListener("abort", () => {
+                    reject(new DOMException("aborted", "AbortError"));
+                  }, { once: true });
+                });
+              }
+              return realFetch(resource, options);
+            };
+        """)
+        self.page.goto(f"{self.base_url}/dashboard_v2.html", wait_until="networkidle")
+        self.page.wait_for_function(
+            "document.body.innerText.includes('Data tidak tersedia.')", timeout=10000
+        )
+        text = self.page.locator("body").inner_text()
+        self.assertIn("UNKNOWN", text)
+        self.assertIn("Data tidak tersedia.", text)
+        self.assertNotIn("PASSED", text)
         self.assert_no_runtime_errors()
 
 
