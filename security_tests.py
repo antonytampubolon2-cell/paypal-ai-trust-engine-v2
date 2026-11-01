@@ -302,7 +302,7 @@ class SecurityTests(unittest.TestCase):
             transaction=self.valid_transaction(), replay_store=self.store,
             paypal_api=mock, expected_url="https://example.test/pay",
             merchant_mapping=self.valid_mapping(),
-            reservation_idempotency_key="bad\\r\\nInjected: yes",
+            reservation_idempotency_key="bad\r\nInjected: yes",
         )
         self.assertEqual(result.order_status, "NOT_ATTEMPTED")
         self.assertEqual(mock.calls, [])
