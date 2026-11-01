@@ -207,13 +207,19 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertEqual(self.page_errors, [])
         self.assertTrue(any("ERR_FAILED" in item for item in self.console_errors), self.console_errors)
 
-    def test_stale_timestamp_remains_unverified_and_unknown(self):
+    def test_stale_timestamp_fails_closed_and_suppresses_transaction_data(self):
         data = json.loads(json.dumps(VALID_DATA))
         data["timestamp"] = "2000-01-01T00:00:00Z"
+        data["transaksi_terakhir"]["order_id"] = "STALE-ORDER-SHOULD-NOT-RENDER"
+        data["transaksi_terakhir"]["merchant"] = "STALE-MERCHANT"
+        data["transaksi_terakhir"]["total"] = "999.99"
         self.open_v2(json.dumps(data))
         text = self.page.locator("body").inner_text()
         self.assertIn("UNVERIFIED", text)
-        self.assertIn("Timestamp file (belum diverifikasi)", text)
+        self.assertIn("Data tidak tersedia.", text)
+        self.assertNotIn("STALE-ORDER-SHOULD-NOT-RENDER", text)
+        self.assertNotIn("STALE-MERCHANT", text)
+        self.assertNotIn("999.99", text)
         self.assertGreaterEqual(text.count("UNKNOWN"), 3)
         self.assertNotIn("SUCCESS", text)
         self.assertNotIn("PASSED", text)
@@ -252,6 +258,34 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertIn("<img src=x", self.page.locator("#transaksi-area").inner_text())
         self.assertIn("<script>", self.page.locator("#audit-area").inner_text())
         self.assert_no_runtime_errors()
+
+    def test_audit_result_cannot_spoof_verified_status(self):
+        data = json.loads(json.dumps(VALID_DATA))
+        data["timestamp"] = "2026-10-31T12:00:00Z"
+        data["audit_trail"] = [{"waktu": "2026-10-31T12:00:00Z", "event": "token check", "hasil": "VERIFIED"}]
+        self.open_v2(json.dumps(data))
+        text = self.page.locator("body").inner_text()
+        self.assertIn("Data tidak tersedia.", text)
+        self.assertNotIn("VERIFIED", text)
+        self.assert_no_runtime_errors()
+
+    def test_both_dashboards_reject_manifest_sha_mismatch(self):
+        self.page.route("**/build-info.json", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "application": "PayPal AI Trust Engine",
+                "frontend_commit": "0" * 40,
+                "build_source": "GitHub Actions checkout",
+                "status": "UNVERIFIED_STATIC_FRONTEND",
+            }),
+        ))
+        for filename in ("dashboard.html", "dashboard_v2.html"):
+            with self.subTest(filename=filename):
+                self.page.goto(f"{self.base_url}/{filename}", wait_until="networkidle")
+                text = self.page.locator("body").inner_text()
+                self.assertIn("UNKNOWN", text)
+                self.assertNotIn("PASSED", text)
+                self.assert_no_runtime_errors()
 
 
 if __name__ == "__main__":
