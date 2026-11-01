@@ -215,7 +215,7 @@ class DashboardBrowserTests(unittest.TestCase):
         data["transaksi_terakhir"]["total"] = "999.99"
         self.open_v2(json.dumps(data))
         text = self.page.locator("body").inner_text()
-        self.assertIn("UNVERIFIED", text)
+        self.assertIn("Semua status harus dianggap UNKNOWN", text)
         self.assertIn("Data tidak tersedia.", text)
         self.assertNotIn("STALE-ORDER-SHOULD-NOT-RENDER", text)
         self.assertNotIn("STALE-MERCHANT", text)
@@ -251,7 +251,7 @@ class DashboardBrowserTests(unittest.TestCase):
         data["timestamp"] = "2026-11-01T00:00:00Z"
         data["transaksi_terakhir"]["order_id"] = payload
         data["transaksi_terakhir"]["merchant"] = payload
-        data["audit_trail"] = [{"waktu": payload, "event": payload, "hasil": payload}]
+        data["audit_trail"] = [{"waktu": payload, "event": payload, "hasil": "UNKNOWN"}]
         self.open_v2(json.dumps(data))
         self.assertEqual(self.page.evaluate("window.__xss"), 0)
         self.assertEqual(self.page.locator("#transaksi-area img, #transaksi-area script").count(), 0)
@@ -297,8 +297,8 @@ class DashboardBrowserTests(unittest.TestCase):
         for filename, data in (("dashboard.html", stale), ("dashboard_v2.html", stale),
                                ("dashboard_v2.html", future)):
             with self.subTest(filename=filename, timestamp=data["timestamp"]):
-                self.page.route("**/hasil.json", lambda route, payload=json.dumps(data): route.fulfill(
-                    status=200, content_type="application/json", body=payload
+                self.page.route("**/hasil.json", lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(data)
                 ))
                 self.page.goto(f"{self.base_url}/{filename}", wait_until="networkidle")
                 text = self.page.locator("body").inner_text()
