@@ -140,7 +140,7 @@ class PayPalOrdersV2PayloadTests(unittest.TestCase):
             "https://example.test/pay", "USD", self.items
         )
         self.assertEqual(result["status"], "BLOCKED")
-        self.assertIn("Legacy demo dispatch disabled", result["reason"])
+        self.assertIn("Legacy mock verification disabled", result["reason"])
 
     def test_legacy_public_entrypoint_has_no_credential_override_or_capture_enablement(self):
         from pathlib import Path
