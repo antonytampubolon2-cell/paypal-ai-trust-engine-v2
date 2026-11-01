@@ -498,7 +498,7 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(direct_sdk_imports, [])
         self.assertEqual(adapter_calls, [("main_public.py", next(
             node.lineno for node in ast.walk(ast.parse((root / "main_public.py").read_text(encoding="utf-8")))
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and node.func.id == "create_order_idempotently"
         ))])
         self.assertEqual(capture_calls, [])
