@@ -152,10 +152,11 @@ def process_payment_request(
         if reservation.status != "RESERVED":
             return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Existing reservation is not dispatchable.")
         spend_reservation_store.mark_dispatch_started(reservation.reservation_id)
-    except Exception:
+    except Exception as exc:
         # The store is part of the security boundary; any storage or policy error
-        # prevents the outbound provider request.
-        return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Atomic spend reservation failed closed.")
+        # prevents the outbound provider request. Expose only the exception class,
+        # never database paths, SQL, credentials, or provider details.
+        return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", f"Atomic spend reservation failed closed ({type(exc).__name__}).")
 
     try:
         response = paypal_api.run(method="create_order", params=params)
