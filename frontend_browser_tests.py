@@ -307,6 +307,35 @@ class DashboardBrowserTests(unittest.TestCase):
                 self.assertNotIn("PASSED", text)
                 self.assert_no_runtime_errors()
 
+    def test_hanging_data_fetch_times_out_and_fails_closed(self):
+        self.page.add_init_script("""
+            const realFetch = window.fetch.bind(window);
+            window.fetch = (resource, options = {}) => {
+              if (String(resource).includes("hasil.json")) {
+                return new Promise((resolve, reject) => {
+                  const signal = options.signal;
+                  if (signal && signal.aborted) {
+                    reject(new DOMException("aborted", "AbortError"));
+                    return;
+                  }
+                  if (signal) signal.addEventListener("abort", () => {
+                    reject(new DOMException("aborted", "AbortError"));
+                  }, { once: true });
+                });
+              }
+              return realFetch(resource, options);
+            };
+        """)
+        self.page.goto(f"{self.base_url}/dashboard_v2.html", wait_until="networkidle")
+        self.page.wait_for_function(
+            "document.body.innerText.includes('Data tidak tersedia.')", timeout=10000
+        )
+        text = self.page.locator("body").inner_text()
+        self.assertIn("UNKNOWN", text)
+        self.assertIn("Data tidak tersedia.", text)
+        self.assertNotIn("PASSED", text)
+        self.assert_no_runtime_errors()
+
 
 if __name__ == "__main__":
     unittest.main()
