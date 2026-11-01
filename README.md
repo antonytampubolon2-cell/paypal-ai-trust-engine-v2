@@ -312,3 +312,22 @@ This project is released under the **MIT License**. See the [`LICENSE`](LICENSE)
 - [RFC 7638 — JSON Web Key (JWK) Thumbprint](https://www.rfc-editor.org/rfc/rfc7638.html)
 
 **PayPal AI Trust Engine — Building a safer foundation for AI-driven commerce.**
+
+
+## Cumulative spending reservations (prototype boundary)
+
+The integrated dispatcher now requires an injected persistent `SQLiteSpendReservationStore`, an authoritative stable `grant_id`, and a caller-generated stable `reservation_idempotency_key` before it will call the PayPal adapter. Missing reservation configuration fails closed before outbound provider I/O.
+
+The reservation ledger in `spend_reservations.py` uses SQLite `BEGIN IMMEDIATE` transactions, unique grant/idempotency keys, Decimal arithmetic, and a durable lifecycle:
+
+- `RESERVED`: amount is held against the grant's cumulative limit.
+- `SETTLED`: verified settlement evidence was recorded; amount remains consumed.
+- `RELEASED`: only permitted with explicit confirmed-non-payment evidence.
+- `EXPIRED`: only a reservation that never began provider dispatch may expire and release its hold.
+- `RECONCILIATION_REQUIRED`: provider dispatch began but the outcome is ambiguous; the amount remains consumed.
+
+Provider I/O occurs outside the database transaction. The dispatcher records dispatch-started before calling the adapter, persists a returned order ID as reconciliation evidence, and leaves the reservation held because order creation is not payment settlement. Ambiguous responses are not retried automatically.
+
+**Deployment limit:** SQLite is supported only for processes on one host sharing the same persistent local database and correct filesystem locking. It is not a multi-host/distributed spend ledger. Do not run this configuration across multiple hosts. A shared atomic store and deployment-specific integration must be implemented and tested before multi-instance operation.
+
+**External contract limit:** the code deliberately requires the caller to supply a stable authoritative grant ID rather than guessing a KYAPay claim name. The issuer's grant schema and PayPal merchant mapping remain unconfirmed. No real payment, authorization, capture, or deployment was performed by the regression tests.
