@@ -241,7 +241,7 @@ class SecurityTests(unittest.TestCase):
     def test_missing_spend_reservation_fails_closed(self):
         token, proof = self.signed_request()
         mock = self.MockPayPal()
-        result = self.dispatch_request(
+        result = process_payment_request(
             compact_token=token, compact_dpop_proof=proof,
             transaction=self.valid_transaction(), replay_store=self.store,
             paypal_api=mock, expected_url="https://example.test/pay",
