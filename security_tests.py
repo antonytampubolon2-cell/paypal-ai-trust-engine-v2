@@ -144,6 +144,7 @@ class SecurityTests(unittest.TestCase):
         self.assertNotEqual(result.delivery_status,"SUCCEEDED")
         self.assertEqual(len(mock.calls),1)
         self.assertEqual(mock.calls[0]["method"],"create_order")
+        self.assertEqual(mock.calls[0]["request_id"], "test-request-1")
         self.assertEqual(mock.calls[0]["params"]["intent"],"AUTHORIZE")
         self.assertNotIn("capture",mock.calls[0]["method"].lower())
         payload=mock.calls[0]["params"]["purchase_units"][0]
