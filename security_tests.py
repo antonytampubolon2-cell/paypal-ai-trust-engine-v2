@@ -5,12 +5,15 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from trustguard_security import SQLiteReplayStore, authenticate_kyapay_jwt, authorize_delegated_transaction, verify_dpop_proof, canonicalize_transaction
+from spend_reservations import SQLiteSpendReservationStore
 from main_public import process_payment_request
 
 class SecurityTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.store=SQLiteReplayStore(str(Path(self.tmp.name)/"replay.sqlite3"))
+        self.spend_store=SQLiteSpendReservationStore(str(Path(self.tmp.name)/"spend.sqlite3"))
+        self._request_counter=0
         self.key=ec.generate_private_key(ec.SECP256R1())
         pem=self.key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
         os.environ.update(KYAPAY_ISSUER="issuer-test",KYAPAY_AUDIENCE="audience-test",KYAPAY_PUBLIC_KEY_PEM=pem,KYAPAY_JWT_ALGORITHM="ES256")
@@ -56,6 +59,13 @@ class SecurityTests(unittest.TestCase):
     def valid_mapping(self):
         return {"merchant-1":"SYNTHETIC-PAYPAL-MERCHANT"}
 
+    def dispatch_request(self, **kwargs):
+        self._request_counter += 1
+        kwargs.setdefault("spend_reservation_store", self.spend_store)
+        kwargs.setdefault("grant_id", "synthetic-test-grant")
+        kwargs.setdefault("reservation_idempotency_key", f"test-request-{self._request_counter}")
+        return process_payment_request(**kwargs)
+
     def test_missing_config_fails_closed(self):
         os.environ.pop("KYAPAY_ISSUER")
         self.assertFalse(authenticate_kyapay_jwt("a.b.c").authenticated)
@@ -96,7 +106,7 @@ class SecurityTests(unittest.TestCase):
             def __init__(self): self.calls=[]
             def run(self,**kwargs): self.calls.append(kwargs); return {"id":"MOCK-ORDER"}
         mock=MockPayPal()
-        result=process_payment_request(
+        result=self.dispatch_request(
             compact_token=token, compact_dpop_proof=proof,
             transaction={"merchant":"merchant-1","amount":"12.34","currency":"USD"},
             replay_store=self.store, paypal_api=mock, expected_url="https://example.test/pay",
@@ -227,6 +237,18 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(len(mock.calls),1)
         self.assertEqual(mock.calls[0]["method"],"create_order")
         self.assertNotIn("capture",mock.calls[0]["method"].lower())
+
+    def test_missing_spend_reservation_fails_closed(self):
+        token, proof = self.signed_request()
+        mock = self.MockPayPal()
+        result = process_payment_request(
+            compact_token=token, compact_dpop_proof=proof,
+            transaction=self.valid_transaction(), replay_store=self.store,
+            paypal_api=mock, expected_url="https://example.test/pay",
+            merchant_mapping=self.valid_mapping(),
+        )
+        self.assertEqual(result.order_status, "NOT_ATTEMPTED")
+        self.assertEqual(mock.calls, [])
 
     def test_invalid_dpop_never_calls_paypal(self):
         token,proof=self.signed_request()
