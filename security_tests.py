@@ -294,6 +294,19 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(result.order_status, "NOT_ATTEMPTED")
         self.assertEqual(mock.calls, [])
 
+    def test_provider_idempotency_key_rejects_header_injection(self):
+        token, proof = self.signed_request()
+        mock = self.MockPayPal()
+        result = self.dispatch_request(
+            compact_token=token, compact_dpop_proof=proof,
+            transaction=self.valid_transaction(), replay_store=self.store,
+            paypal_api=mock, expected_url="https://example.test/pay",
+            merchant_mapping=self.valid_mapping(),
+            reservation_idempotency_key="bad\\r\\nInjected: yes",
+        )
+        self.assertEqual(result.order_status, "NOT_ATTEMPTED")
+        self.assertEqual(mock.calls, [])
+
     def test_prior_dispatch_with_same_idempotency_key_is_not_retried(self):
         token1, proof1 = self.signed_request()
         token2, proof2 = self.signed_request()
