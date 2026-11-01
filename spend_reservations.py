@@ -83,6 +83,17 @@ class SQLiteSpendReservationStore:
                         ON spend_reservations(grant_id, status);
                     CREATE UNIQUE INDEX IF NOT EXISTS spend_reservations_provider_reference
                         ON spend_reservations(provider_reference) WHERE provider_reference IS NOT NULL;
+                    CREATE TABLE IF NOT EXISTS spend_reservation_events (
+                        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        reservation_id TEXT NOT NULL REFERENCES spend_reservations(reservation_id),
+                        event_type TEXT NOT NULL CHECK(event_type IN ('ORDER_CREATED','PROVIDER_UNKNOWN','SETTLED','RELEASED')),
+                        external_reference TEXT,
+                        created_at REAL NOT NULL,
+                        UNIQUE(reservation_id, event_type, external_reference)
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS spend_reservation_order_reference
+                        ON spend_reservation_events(external_reference)
+                        WHERE event_type='ORDER_CREATED' AND external_reference IS NOT NULL;
                 """)
                 db.commit()
         except sqlite3.Error as exc:
@@ -253,6 +264,46 @@ class SQLiteSpendReservationStore:
                 return {"expired": a, "reconciliation_required": b}
         except sqlite3.Error as exc:
             raise ReservationStorageError("Reservation expiry sweep failed; do not dispatch new payments.") from exc
+
+    def record_order_created(self, reservation_id: str, *, order_id: str,
+                            now: float | None = None) -> None:
+        """Persist a verified order id without treating order creation as settlement."""
+        now = time.time() if now is None else float(now)
+        if not isinstance(order_id, str) or not order_id.strip() or len(order_id) > 255:
+            raise ReservationError("A provider order identifier is required.")
+        try:
+            with self._connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT status,dispatch_started FROM spend_reservations WHERE reservation_id=?",
+                                 (reservation_id,)).fetchone()
+                if row is None or row[0] != "RESERVED" or not row[1]:
+                    raise ReservationError("Order evidence requires an active dispatched reservation.")
+                existing = db.execute("""SELECT external_reference FROM spend_reservation_events
+                    WHERE reservation_id=? AND event_type='ORDER_CREATED'""", (reservation_id,)).fetchone()
+                if existing:
+                    if existing[0] != order_id:
+                        raise ReservationError("Reservation already records a different provider order.")
+                    db.execute("COMMIT")
+                    return
+                db.execute("""INSERT INTO spend_reservation_events
+                    (reservation_id,event_type,external_reference,created_at)
+                    VALUES(?,'ORDER_CREATED',?,?)""", (reservation_id, order_id, now))
+                db.execute("COMMIT")
+        except ReservationError:
+            raise
+        except sqlite3.Error as exc:
+            raise ReservationStorageError("Unable to persist provider order evidence; reconcile before retrying.") from exc
+
+    def events_for(self, reservation_id: str) -> list[dict[str, object]]:
+        """Return persisted provider evidence events for reconciliation."""
+        try:
+            with self._connection() as db:
+                rows = db.execute("""SELECT event_type,external_reference,created_at
+                    FROM spend_reservation_events WHERE reservation_id=? ORDER BY event_id""",
+                    (reservation_id,)).fetchall()
+            return [{"event_type": row[0], "external_reference": row[1], "created_at": row[2]} for row in rows]
+        except sqlite3.Error as exc:
+            raise ReservationStorageError("Reservation event lookup failed; fail closed.") from exc
 
     def get(self, reservation_id: str) -> Reservation | None:
         try:
