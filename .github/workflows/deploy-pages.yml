@@ -20,8 +20,8 @@ jobs:
     if: github.ref == 'refs/heads/main' && inputs.confirm_production_deploy == 'DEPLOY_TO_PRODUCTION'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
       - name: Build static site with commit identity
@@ -68,7 +68,7 @@ jobs:
               assert marker not in combined, f"forbidden legacy content: {marker}"
           print("Pre-deploy artifact checks passed for", expected)
           PY
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         with:
           path: _site
 
@@ -85,7 +85,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
       - name: Verify public pages identify this exact commit
         env:
           EXPECTED_SHA: ${{ github.sha }}
