@@ -74,6 +74,16 @@
   const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const isNullableString = value => value === null || typeof value === "string";
   const MAX_DATA_AGE_MS = 24 * 60 * 60 * 1000;
+  const FETCH_TIMEOUT_MS = 8000;
+  async function fetchWithTimeout(resource, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(resource, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
   const AUDIT_RESULTS = new Set(["UNKNOWN", "UNVERIFIED", "FAILED", "REJECTED", "ORDER_CREATED", "NOT_ATTEMPTED"]);
 
