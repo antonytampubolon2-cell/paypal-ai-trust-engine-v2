@@ -65,13 +65,23 @@
   "use strict";
   const unknown = "UNKNOWN · BELUM TERHUBUNG";
   const MAX_DATA_AGE_MS = 24 * 60 * 60 * 1000;
+  const FETCH_TIMEOUT_MS = 8000;
+  async function fetchWithTimeout(resource, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(resource, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
   const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
   async function verifyBuildIdentity() {
     const metaSha = document.querySelector('meta[name="trustguard-build-commit"]')?.content || "";
     const visibleSha = document.getElementById("build-commit")?.textContent.trim() || "";
     if (!/^[0-9a-f]{40}$/.test(metaSha) || visibleSha !== metaSha) throw new Error("Build identity mismatch");
-    const response = await fetch("build-info.json", { cache: "no-store", headers: { "Accept": "application/json" } });
+    const response = await fetchWithTimeout("build-info.json", { cache: "no-store", headers: { "Accept": "application/json" } });
     if (!response.ok) throw new Error("Build manifest unavailable");
     const manifest = await response.json();
     if (!isRecord(manifest) || manifest.application !== "PayPal AI Trust Engine" ||
@@ -102,7 +112,7 @@
     document.getElementById("policy-status").textContent = unknown;
     document.getElementById("delivery-status").textContent = unknown;
   };
-  verifyBuildIdentity().then(() => fetch("hasil.json", { cache: "no-store", headers: { "Accept": "application/json" } }))
+  verifyBuildIdentity().then(() => fetchWithTimeout("hasil.json", { cache: "no-store", headers: { "Accept": "application/json" } }))
     .then(response => {
       if (!response.ok) throw new Error("Static data unavailable");
       return response.json();
