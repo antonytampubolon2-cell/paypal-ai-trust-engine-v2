@@ -177,7 +177,7 @@ class SecurityTests(unittest.TestCase):
     def test_bad_token_never_calls_paypal(self):
         class NeverCall:
             def run(self,**kwargs): raise AssertionError("unexpected outbound request")
-        result=process_payment_request(compact_token="bad",compact_dpop_proof="bad",transaction={"merchant":"merchant-1","amount":"1","currency":"USD"},replay_store=self.store,paypal_api=NeverCall(),expected_url="https://example.test/pay")
+        result=self.dispatch_request(compact_token="bad",compact_dpop_proof="bad",transaction={"merchant":"merchant-1","amount":"1","currency":"USD"},replay_store=self.store,paypal_api=NeverCall(),expected_url="https://example.test/pay")
         self.assertEqual(result.delivery_status,"NOT_ATTEMPTED")
 
 
@@ -215,7 +215,7 @@ class SecurityTests(unittest.TestCase):
                         self.calls.append(kwargs)
                         raise AssertionError("PayPal mock must not be called for invalid request")
                 mock=NeverCallPayPal()
-                result=process_payment_request(
+                result=self.dispatch_request(
                     compact_token=token,compact_dpop_proof=proof,transaction=transaction,
                     replay_store=self.store,paypal_api=mock,expected_url="https://example.test/pay",
                     merchant_mapping=mapping,
@@ -227,7 +227,7 @@ class SecurityTests(unittest.TestCase):
     def test_status_contract_capture_stays_not_attempted_after_order_creation(self):
         token,proof=self.signed_request()
         mock=self.MockPayPal()
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        result=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual((result.authentication_status,result.dpop_status,result.authorization_status),
@@ -241,7 +241,7 @@ class SecurityTests(unittest.TestCase):
     def test_missing_spend_reservation_fails_closed(self):
         token, proof = self.signed_request()
         mock = self.MockPayPal()
-        result = process_payment_request(
+        result = self.dispatch_request(
             compact_token=token, compact_dpop_proof=proof,
             transaction=self.valid_transaction(), replay_store=self.store,
             paypal_api=mock, expected_url="https://example.test/pay",
@@ -253,7 +253,7 @@ class SecurityTests(unittest.TestCase):
     def test_invalid_dpop_never_calls_paypal(self):
         token,proof=self.signed_request()
         mock=self.MockPayPal()
-        result=process_payment_request(compact_token=token,compact_dpop_proof="invalid-proof",
+        result=self.dispatch_request(compact_token=token,compact_dpop_proof="invalid-proof",
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual(result.dpop_status,"FAILED")
@@ -264,7 +264,7 @@ class SecurityTests(unittest.TestCase):
         token,proof=self.signed_request()
         tx={"merchant":"not-allowed","amount":"1.00","currency":"USD"}
         mock=self.MockPayPal()
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        result=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=tx,replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",
             merchant_mapping={"not-allowed":"SYNTHETIC-PAYPAL-MERCHANT"})
@@ -287,10 +287,10 @@ class SecurityTests(unittest.TestCase):
             return jwt.encode({"htm":"POST","htu":"https://example.test/pay","jti":jti,"iat":int(time.time()),"ath":ath},
                 dpop_key,algorithm="ES256",headers={"typ":"dpop+jwt","jwk":jwk})
         mock=self.MockPayPal()
-        first=process_payment_request(compact_token=token,compact_dpop_proof=proof("proof-token-first"),
+        first=self.dispatch_request(compact_token=token,compact_dpop_proof=proof("proof-token-first"),
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
-        second=process_payment_request(compact_token=token,compact_dpop_proof=proof("proof-token-second"),
+        second=self.dispatch_request(compact_token=token,compact_dpop_proof=proof("proof-token-second"),
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual(first.order_status,"ORDER_CREATED")
@@ -300,11 +300,11 @@ class SecurityTests(unittest.TestCase):
     def test_dpop_replay_never_creates_second_order(self):
         token,proof=self.signed_request()
         mock=self.MockPayPal()
-        first=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        first=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         # Use same token, so DPoP replay rejection occurs before token replay policy.
-        second=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        second=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual(first.order_status,"ORDER_CREATED")
@@ -318,7 +318,7 @@ class SecurityTests(unittest.TestCase):
         results=[]
         def invoke():
             barrier.wait()
-            result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+            result=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
                 transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
                 expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
             results.append(result)
@@ -335,7 +335,7 @@ class SecurityTests(unittest.TestCase):
             def claim_once(self, namespace, identifier, expires_at):
                 raise OSError("synthetic replay store outage")
         mock=self.MockPayPal()
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        result=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=BrokenReplayStore(),paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual(result.order_status,"NOT_ATTEMPTED")
@@ -354,7 +354,7 @@ class SecurityTests(unittest.TestCase):
         token,proof=self.signed_request()
         # A transport exception may happen after the provider accepted the request.
         mock=self.MockPayPal(error=TimeoutError("synthetic ambiguous provider timeout"))
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        result=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual(result.order_status,"UNKNOWN")
@@ -365,7 +365,7 @@ class SecurityTests(unittest.TestCase):
     def test_order_unknown_response_does_not_claim_capture_success(self):
         token,proof=self.signed_request()
         mock=self.MockPayPal(response={"status":"CREATED"})
-        result=process_payment_request(compact_token=token,compact_dpop_proof=proof,
+        result=self.dispatch_request(compact_token=token,compact_dpop_proof=proof,
             transaction=self.valid_transaction(),replay_store=self.store,paypal_api=mock,
             expected_url="https://example.test/pay",merchant_mapping=self.valid_mapping())
         self.assertEqual(result.order_status,"UNKNOWN")
