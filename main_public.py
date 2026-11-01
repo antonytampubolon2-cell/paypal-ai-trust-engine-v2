@@ -6,6 +6,8 @@ No issuer trust material is bundled: configure it from the official KYAPay issue
 from __future__ import annotations
 
 from typing import Any, Mapping
+import math
+import time
 
 from trustguard_security import (
     PaymentResult,
@@ -17,6 +19,7 @@ from trustguard_security import (
     verify_dpop_proof,
 )
 from paypal_rest import RestItemValidationError, normalize_rest_items
+from spend_reservations import ReservationError, ReservationStorageError, SQLiteSpendReservationStore
 
 
 def process_payment_request(
@@ -30,12 +33,17 @@ def process_payment_request(
     expected_url: str,
     merchant_mapping: Mapping[str, str] | None = None,
     rest_items: list[Mapping[str, Any]] | None = None,
+    spend_reservation_store: SQLiteSpendReservationStore | None = None,
+    grant_id: str | None = None,
+    reservation_idempotency_key: str | None = None,
+    reservation_ttl_seconds: int = 300,
 ) -> PaymentResult:
     """Fail closed through authentication, DPoP, policy, then order creation only.
 
     Legacy result fields remain available. Explicit status fields independently
     report authentication, DPoP, authorization, order creation, and capture.
-    This function never captures a payment.
+    This function never captures a payment. Provider dispatch additionally requires
+    a durable spend reservation keyed by an authoritative grant id and stable request key.
     """
     def result(auth: str, dpop: str, authorization: str, order: str, reason: str) -> PaymentResult:
         return PaymentResult(
@@ -108,19 +116,69 @@ def process_payment_request(
             }
         }
     params = {"intent": "AUTHORIZE", "purchase_units": [purchase_unit]}
+
+    # The issuer's grant identifier is not inferred from an unconfirmed claim name.
+    # The integration layer must supply a stable authoritative identifier and
+    # stable caller idempotency key. Without both, payment dispatch is disabled.
+    if spend_reservation_store is None or not grant_id or not reservation_idempotency_key:
+        return result(
+            "PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED",
+            "Atomic cumulative-spend reservation is not configured; provider dispatch failed closed.",
+        )
+    if isinstance(reservation_ttl_seconds, bool) or not isinstance(reservation_ttl_seconds, int) or reservation_ttl_seconds < 1:
+        return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Reservation lease configuration is invalid.")
+
+    grant = auth.claims.get("delegation_grant")
+    token_exp = auth.claims.get("exp")
+    grant_exp = grant.get("valid_until") if isinstance(grant, Mapping) else None
+    if (
+        not isinstance(grant, Mapping)
+        or isinstance(token_exp, bool) or not isinstance(token_exp, (int, float)) or not math.isfinite(token_exp)
+        or isinstance(grant_exp, bool) or not isinstance(grant_exp, (int, float)) or not math.isfinite(grant_exp)
+    ):
+        return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Grant expiry evidence is invalid; reservation denied.")
+    now = time.time()
+    reservation_expires_at = min(float(token_exp), float(grant_exp), now + reservation_ttl_seconds)
+    try:
+        reservation = spend_reservation_store.reserve(
+            grant_id=grant_id,
+            max_spend=grant.get("max_spend"),
+            amount=canonical.amount,
+            currency=canonical.currency,
+            idempotency_key=reservation_idempotency_key,
+            expires_at=reservation_expires_at,
+            now=now,
+        )
+        if reservation.status != "RESERVED":
+            return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Existing reservation is not dispatchable.")
+        spend_reservation_store.mark_dispatch_started(reservation.reservation_id)
+    except (ReservationError, ReservationStorageError, Exception):
+        # The store is part of the security boundary; any storage or policy error
+        # prevents the outbound provider request.
+        return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Atomic spend reservation failed closed.")
+
     try:
         response = paypal_api.run(method="create_order", params=params)
         if not isinstance(response, Mapping) or not isinstance(response.get("id"), str) or not response["id"]:
-            return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "PayPal adapter returned no verifiable order identifier.")
+            spend_reservation_store.mark_unknown(reservation.reservation_id)
+            return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "PayPal adapter returned no verifiable order identifier; reconciliation is required.")
+        try:
+            spend_reservation_store.record_order_created(reservation.reservation_id, order_id=response["id"])
+        except Exception:
+            spend_reservation_store.mark_unknown(reservation.reservation_id)
+            return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "Order response was received but evidence persistence failed; reconciliation is required.")
         return result(
             "PASSED", "PASSED", "PASSED", "ORDER_CREATED",
-            "PayPal order was created; capture was not attempted and payment is not confirmed.",
+            "PayPal order was created; spend remains reserved. Capture was not attempted and payment is not confirmed.",
         )
     except Exception:
-        # A timeout or transport error may occur after the provider accepted the
-        # request. Without a verified idempotency/reconciliation contract, report
-        # an ambiguous outcome and never imply that no order was created.
-        return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "PayPal order outcome is unknown; provider details were redacted. Do not retry automatically.")
+        # The provider may have accepted the request before the transport failed.
+        # Keep the reservation and prohibit automatic retries pending reconciliation.
+        try:
+            spend_reservation_store.mark_unknown(reservation.reservation_id)
+        except Exception:
+            pass  # Reservation was durably marked dispatch-started before provider I/O.
+        return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "PayPal order outcome is unknown; spend remains reserved. Do not retry automatically.")
 
 
 def main() -> int:
