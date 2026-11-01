@@ -458,4 +458,9 @@ class SecurityTests(unittest.TestCase):
                     ).allowed
                 )
 
+
+    def test_unrepresentably_large_expiry_fails_closed(self):
+        token = self.token(exp=10 ** 2000)
+        self.assertFalse(authenticate_kyapay_jwt(token).authenticated)
+
 if __name__=="__main__": unittest.main()
