@@ -12,7 +12,7 @@ class SecurityTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.store=SQLiteReplayStore(str(Path(self.tmp.name)/"replay.sqlite3"))
-        self.spend_store=SQLiteSpendReservationStore(str(Path(self.tmp.name)/"spend.sqlite3"))
+        self.spend_store=SQLiteSpendReservationStore(str(Path(self.tmp.name)/"spend.sqlite3"), deployment_mode="single-host")
         self._request_counter=0
         self.key=ec.generate_private_key(ec.SECP256R1())
         pem=self.key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
@@ -237,6 +237,23 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(len(mock.calls),1)
         self.assertEqual(mock.calls[0]["method"],"create_order")
         self.assertNotIn("capture",mock.calls[0]["method"].lower())
+
+    def test_spend_reservation_store_failure_prevents_provider_dispatch(self):
+        token, proof = self.signed_request()
+        class BrokenSpendStore:
+            def reserve(self, **kwargs):
+                raise OSError("synthetic spend store outage")
+        mock = self.MockPayPal()
+        result = process_payment_request(
+            compact_token=token, compact_dpop_proof=proof,
+            transaction=self.valid_transaction(), replay_store=self.store,
+            paypal_api=mock, expected_url="https://example.test/pay",
+            merchant_mapping=self.valid_mapping(),
+            spend_reservation_store=BrokenSpendStore(), grant_id="synthetic-grant",
+            reservation_idempotency_key="stable-test-key",
+        )
+        self.assertEqual(result.order_status, "NOT_ATTEMPTED")
+        self.assertEqual(mock.calls, [])
 
     def test_missing_spend_reservation_fails_closed(self):
         token, proof = self.signed_request()
