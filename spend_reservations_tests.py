@@ -76,7 +76,7 @@ class SpendReservationTests(unittest.TestCase):
         r = self.reserve("unknown", "40.00")
         self.store.mark_dispatch_started(r.reservation_id)
         self.store.mark_unknown(r.reservation_id)
-        restarted = SQLiteSpendReservationStore(self.path)
+        restarted = SQLiteSpendReservationStore(self.path, deployment_mode="single-host")
         self.assertEqual(restarted.get(r.reservation_id).status, "RECONCILIATION_REQUIRED")
         with self.assertRaises(ReservationError):
             restarted.reserve(grant_id="issuer-grant-1", max_spend="100.00", amount="61.00",
