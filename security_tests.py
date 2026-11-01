@@ -92,6 +92,7 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(sum(outcomes),1)
     def test_replay_claim_has_one_winner_across_processes(self):
         shared_path = str(Path(self.tmp.name) / "cross-process-replay.sqlite3")
+        SQLiteReplayStore(shared_path)  # Initialize schema before concurrent process startup.
         expiry = time.time() + 60
         code = (
             "import sys; from trustguard_security import SQLiteReplayStore; "
