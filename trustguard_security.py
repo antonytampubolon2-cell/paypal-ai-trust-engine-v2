@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -220,6 +221,11 @@ def authenticate_kyapay_jwt(compact_token: str) -> AuthenticationResult:
             options={"require": ["iss", "sub", "aud", "exp", "jti", "delegation_grant"]},
             leeway=0,
         )
+        exp = claims.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            return AuthenticationResult(False, reason="Token exp must be a finite NumericDate.")
+        if not isinstance(claims.get("sub"), str) or not claims["sub"].strip():
+            return AuthenticationResult(False, reason="A non-empty sub claim is required.")
         if not isinstance(claims.get("delegation_grant"), dict):
             return AuthenticationResult(False, reason="delegation_grant must be an object.")
         if not isinstance(claims.get("jti"), str) or not claims["jti"]:
@@ -347,6 +353,8 @@ def authorize_delegated_transaction(
         max_spend = Decimal(str(grant.get("max_spend")))
         grant_currency = grant.get("currency")
         valid_until = float(grant.get("valid_until"))
+        if not math.isfinite(valid_until):
+            return PolicyResult(False, "Delegation grant expiry must be a finite timestamp.")
         if not isinstance(merchant, str) or not merchant:
             return PolicyResult(False, "Transaction merchant is required.")
         if not isinstance(allowed_merchants, list) or merchant not in allowed_merchants:
@@ -360,7 +368,7 @@ def authorize_delegated_transaction(
         if valid_until <= now:
             return PolicyResult(False, "Delegation grant has expired.")
         token_exp = float(claims.get("exp"))
-        if token_exp <= now:
+        if not math.isfinite(token_exp) or token_exp <= now:
             return PolicyResult(False, "Authorization token has expired.")
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti:
