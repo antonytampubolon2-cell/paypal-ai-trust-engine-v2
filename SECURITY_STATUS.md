@@ -46,3 +46,19 @@ The tests must pass in CI before review. A passing synthetic test suite does not
 - Separate backend CI: **38/38 tests passed** on `bab050eb8519b05cc17f800fa273082df0bc700b`.
 - No PayPal API calls, real orders, captures, refunds, transfers, production credentials, or deployments were used.
 - This test result establishes local code/test behavior only. It does not resolve the external integration blockers above or establish production readiness.
+
+
+## Phase 2 — cumulative spending reservation boundary
+
+- Added `spend_reservations.py` with atomic SQLite reservation, idempotency, lifecycle transitions, expiry handling, and durable provider-order evidence.
+- The dispatcher now fails closed before provider I/O unless a persistent reservation store, authoritative grant ID, and stable request idempotency key are injected.
+- Before provider I/O, the dispatcher persists `dispatch_started`; an ambiguous provider result becomes `RECONCILIATION_REQUIRED` and continues to consume grant budget. A verified order ID is persisted as `ORDER_CREATED` evidence, not as settlement.
+- `spend_reservations_tests.py` covers simultaneous reservation attempts, idempotency collisions, grant-limit immutability, restart durability, expiry behavior, release/settlement guards, and order evidence.
+
+### Precise guarantees and limitations
+
+SQLite `BEGIN IMMEDIATE` serializes reservation writers for processes sharing one persistent local database on a single host. The concurrency test launches 24 simultaneous requests for a grant limit of 100.00 USD at 10.00 USD per request and expects exactly ten reservations to succeed. This does not establish distributed/multi-host safety; that mode remains disabled and requires a shared atomic store.
+
+The current PayPal adapter interface does not yet prove provider-level `PayPal-Request-Id` propagation or reconciliation by idempotency key. No automatic retry is performed after ambiguous outcomes. Obtain official integration details and implement a provider adapter with explicit idempotency and lookup/reconciliation behavior before enabling real external transactions.
+
+No KYAPay issuer metadata, keys, grant identifiers, or PayPal merchant mappings have been invented. No real PayPal order, authorization, capture, refund, transfer, or deployment was executed.
