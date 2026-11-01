@@ -71,8 +71,10 @@ class ReleasePipelineTests(unittest.TestCase):
             text = (ROOT / relative).read_text(encoding="utf-8")
             with self.subTest(workflow=relative):
                 self.assertIn("runs-on: ubuntu-24.04", text)
-                self.assertIn("actions/checkout@v7", text)
-                self.assertIn("actions/setup-python@v7", text)
+                # Pin third-party workflow code to immutable, reviewed commit SHAs.
+                self.assertRegex(text, r"actions/checkout@[0-9a-f]{40}")
+                self.assertRegex(text, r"actions/setup-python@[0-9a-f]{40}")
+                self.assertNotRegex(text, r"actions/(?:checkout|setup-python)@v[0-9]+(?:\\b|$)")
 
     def test_dashboard_fetches_are_timeout_bounded_in_release_candidate(self):
         for relative in ("dashboard.html", "dashboard_v2.html"):
