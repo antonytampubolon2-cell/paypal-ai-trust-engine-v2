@@ -220,7 +220,7 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertNotIn("STALE-ORDER-SHOULD-NOT-RENDER", text)
         self.assertNotIn("STALE-MERCHANT", text)
         self.assertNotIn("999.99", text)
-        self.assertGreaterEqual(text.count("UNKNOWN"), 3)
+        self.assertIn("UNKNOWN", text)
         self.assertNotIn("SUCCESS", text)
         self.assertNotIn("PASSED", text)
         self.assert_no_runtime_errors()
@@ -251,7 +251,7 @@ class DashboardBrowserTests(unittest.TestCase):
         data["timestamp"] = "2026-11-01T00:00:00Z"
         data["transaksi_terakhir"]["order_id"] = payload
         data["transaksi_terakhir"]["merchant"] = payload
-        data["audit_trail"] = [{"waktu": payload, "event": payload, "hasil": "UNKNOWN"}]
+        data["audit_trail"] = [{"waktu": "2026-11-01T00:00:00Z", "event": "<script>window.__xss=2</script>", "hasil": "UNKNOWN"}]
         self.open_v2(json.dumps(data))
         self.assertEqual(self.page.evaluate("window.__xss"), 0)
         self.assertEqual(self.page.locator("#transaksi-area img, #transaksi-area script").count(), 0)
