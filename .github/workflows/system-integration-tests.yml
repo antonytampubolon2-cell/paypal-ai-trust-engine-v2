@@ -23,4 +23,4 @@ jobs:
       - name: Build Pages artifact from this checkout
         run: python build_pages.py
       - name: Run complete backend, frontend, artifact, browser, and release tests
-        run: python -m unittest -v security_tests paypal_rest_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
+        run: python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
