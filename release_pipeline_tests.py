@@ -63,6 +63,16 @@ class ReleasePipelineTests(unittest.TestCase):
         self.assertIn("manifest_sha == dashboard_sha", probe)
         self.assertIn("TRUSTGUARD_PROBE_STRICT", probe)
 
+    def test_workflows_use_supported_runner_and_node24_compatible_actions(self):
+        for relative in (".github/workflows/deploy-pages.yml",
+                         ".github/workflows/release-pipeline-tests.yml",
+                         ".github/workflows/dashboard-tests.yml"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(workflow=relative):
+                self.assertIn("runs-on: ubuntu-24.04", text)
+                self.assertIn("actions/checkout@v7", text)
+                self.assertIn("actions/setup-python@v7", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
