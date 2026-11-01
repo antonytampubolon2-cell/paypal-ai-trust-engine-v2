@@ -18,10 +18,10 @@ concurrency:
 jobs:
   build:
     if: github.ref == 'refs/heads/main' && inputs.confirm_production_deploy == 'DEPLOY_TO_PRODUCTION'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Build static site with commit identity
@@ -75,7 +75,7 @@ jobs:
   deploy:
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
