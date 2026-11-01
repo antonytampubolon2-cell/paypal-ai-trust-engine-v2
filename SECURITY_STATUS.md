@@ -6,8 +6,8 @@ This branch is a defensive prototype, not production-ready. No live payment or c
 
 - Removed import-time PayPal toolkit initialization and the placeholder assignments that overwrote `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`.
 - Added a signed-JWT verification adapter that fails closed unless the operator supplies `KYAPAY_ISSUER`, `KYAPAY_AUDIENCE`, `KYAPAY_PUBLIC_KEY_PEM`, and `KYAPAY_JWT_ALGORITHM`.
-- Added signed DPoP JWT verification, public-JWK thumbprint binding, `htm`, canonical HTTPS `htu`, `iat`, `jti`, and access-token `ath` checks.
-- Added SQLite atomic replay claims and transaction policy checks for allowed merchant, amount, currency, grant expiry, and token expiry.
+- Added signed DPoP JWT verification, public-JWK thumbprint binding, `htm`, strict canonical HTTPS `htu`, `iat`, `jti`, and access-token `ath` checks. Full RFC 9449 interoperability remains unverified.
+- Added SQLite atomic replay claims and transaction policy checks for allowed merchant, amount, currency, and finite grant/token expiry values; non-finite `NaN`/`Infinity` expiry claims fail closed.
 - Separated authentication, policy, and delivery outcomes in `PaymentResult`.
 - Added negative regression tests and a GitHub Actions test workflow. The tests use explicitly synthetic, ephemeral test fixtures only; they do not establish a real KYAPay issuer or production trust relationship.
 
@@ -22,10 +22,27 @@ This branch is a defensive prototype, not production-ready. No live payment or c
 
 ## Test procedure
 
-Install dependencies from `requirements-security.txt`, then run:
+Install test dependencies from `requirements-security.txt`. To run backend tests:
 
 ```sh
-python -m unittest -v security_tests
+python -m unittest -v security_tests paypal_rest_tests
+```
+
+For the complete integrated suite, install `pyyaml` and `playwright`, install Chromium with `python -m playwright install chromium`, build the Pages artifact with `python build_pages.py`, then run:
+
+```sh
+python -m unittest -v security_tests paypal_rest_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
 ```
 
 The tests must pass in CI before review. A passing synthetic test suite does not resolve the issuer/schema/merchant/replay-store blockers above.
+
+
+## Integrated verification snapshot
+
+- System integration candidate: [PR #9](https://github.com/antonytampubolon2-cell/paypal-ai-trust-engine-v2/pull/9)
+- Commit verified by CI: `67dc4faff123a7cde4e6c64f9da2e7e45d8806a3`
+- Combined integration suite: **81/81 tests passed** (29 security/dispatcher, 9 PayPal REST schema/amount binding, 13 frontend contract, 9 Pages artifact, 14 browser, 7 release workflow).
+- CI run: https://github.com/antonytampubolon2-cell/paypal-ai-trust-engine-v2/actions/runs/41296885865
+- Separate backend CI: **38/38 tests passed** on `bab050eb8519b05cc17f800fa273082df0bc700b`.
+- No PayPal API calls, real orders, captures, refunds, transfers, production credentials, or deployments were used.
+- This test result establishes local code/test behavior only. It does not resolve the external integration blockers above or establish production readiness.
