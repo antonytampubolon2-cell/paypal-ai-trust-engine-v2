@@ -2,7 +2,7 @@
 
 ### Secure Transactions for AI Agents — Trust, Verification, and Controlled Authorization
 
-**PayPal AI Trust Engine** is a security-focused prototype designed to help protect PayPal transactions initiated by AI agents. It introduces a layered verification workflow that evaluates delegated authorization, detects token replay attempts, checks Demonstrating Proof of Possession (DPoP) binding, and forwards eligible requests to the PayPal Sandbox.
+**PayPal AI Trust Engine** is a security-focused prototype for evaluating delegated authorization and proof-of-possession signals before an optional PayPal Orders request. The current code uses an injected provider adapter; automated tests use mocks and do not call PayPal. Official KYAPay trust material and provider interoperability remain unverified.
 
 The project's core principle is simple: **an AI agent should not be trusted to initiate a financial transaction merely because it can access a payment API.** Its authorization and transaction request should be evaluated before the request proceeds.
 
@@ -13,7 +13,7 @@ Built for the **PayPal AI Hackathon 2026**, the project combines Python-based se
 ## Table of Contents
 
 - [Project Overview](#project-overview)
-- [Live Demo](#live-demo)
+- [Dashboard Preview and Deployment Status](#dashboard-preview-and-deployment-status)
 - [The Problem](#the-problem)
 - [Our Solution](#our-solution)
 - [Security Architecture](#security-architecture)
@@ -21,7 +21,6 @@ Built for the **PayPal AI Hackathon 2026**, the project combines Python-based se
 - [Technology Stack](#technology-stack)
 - [Getting Started](#getting-started)
 - [Judges' Testing Instructions](#judges-testing-instructions)
-- [Expected Test Results](#expected-test-results)
 - [Security Considerations and Prototype Scope](#security-considerations-and-prototype-scope)
 - [Roadmap](#roadmap)
 - [License](#license)
@@ -32,7 +31,7 @@ Built for the **PayPal AI Hackathon 2026**, the project combines Python-based se
 
 AI agents are increasingly capable of initiating actions on behalf of users, including interactions with commerce and payment services. As these agents become more autonomous, payment integrations need controls that help prevent unauthorized actions, replayed credentials, and transactions that exceed delegated permissions.
 
-PayPal AI Trust Engine explores a layered approach to this problem through **TrustGuard Agent**, a verification workflow designed to check authorization and proof-of-possession signals before a payment order is submitted to PayPal Sandbox.
+PayPal AI Trust Engine explores a layered approach to this problem through **TrustGuard Agent**, a verification workflow designed to check authorization and proof-of-possession signals before an optional order-creation request is sent through an injected provider adapter.
 
 ### Project Information
 
@@ -42,9 +41,9 @@ PayPal AI Trust Engine explores a layered approach to this problem through **Tru
 | Security Workflow | TrustGuard Agent |
 | Backend | Python |
 | Frontend | HTML, CSS, and JavaScript |
-| Payment Integration | PayPal Agent Toolkit |
-| Test Environment | PayPal Sandbox |
-| Dashboard Hosting | GitHub Pages |
+| Payment Integration | Injected PayPal Orders v2 adapter boundary (mocked in tests) |
+| Intended Test Environment | PayPal Sandbox; interoperability not verified |
+| Dashboard Hosting | GitHub Pages source; public deployment not verified |
 | License | MIT |
 
 ## Dashboard Preview and Deployment Status
@@ -143,11 +142,11 @@ These checks demonstrate selected binding and replay-detection concepts.
 
 ### 4. Fraud Risk Engine (FRP)
 
-The Live Dashboard includes a Fraud Risk Engine (FRP) monitoring panel intended to provide visibility into suspicious transaction activity and anomaly-related status.
+The static dashboard describes the intended Fraud Risk Engine (FRP) layer, but the page is not connected to authenticated telemetry and does not establish that live scoring ran.
 
-The dashboard is a monitoring interface, not a standalone guarantee that a transaction is safe. The currently published `main_public.py` does not provide a complete, independently verifiable FRP scoring pipeline.
+The dashboard is a presentation interface, not a standalone guarantee that a transaction is safe. The backend does not provide a complete, independently verifiable FRP scoring pipeline.
 
-### 5. PayPal Agent Toolkit Integration
+### 5. PayPal Orders Adapter Boundary
 
 The hardened entry point does not initialize the PayPal toolkit on import and does not enable capture actions. Order creation is possible only through an explicitly injected adapter after authentication and policy checks.
 
