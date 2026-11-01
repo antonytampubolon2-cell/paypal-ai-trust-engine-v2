@@ -113,6 +113,14 @@ class FrontendHardeningTests(unittest.TestCase):
         self.assertIn("UNVERIFIED CLAIM · ", self.dashboard_v2)
         self.assertIn('allowed.has(item.hasil)', self.dashboard)
 
+    def test_both_dashboards_apply_abortable_fetch_timeouts(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
+                self.assertIn("AbortController", html)
+                self.assertIn("FETCH_TIMEOUT_MS", html)
+                self.assertIn("fetchWithTimeout(\"build-info.json\"", html)
+                self.assertIn("fetchWithTimeout(\"hasil.json\"", html)
+
 
 if __name__ == "__main__":
     unittest.main()
