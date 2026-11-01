@@ -73,6 +73,19 @@
   const DELIVERY_STATUSES = new Set(["UNKNOWN", "ORDER_CREATED"]);
   const isRecord = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const isNullableString = value => value === null || typeof value === "string";
+  const MAX_DATA_AGE_MS = 24 * 60 * 60 * 1000;
+  const FETCH_TIMEOUT_MS = 8000;
+  async function fetchWithTimeout(resource, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(resource, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+  const AUDIT_RESULTS = new Set(["UNKNOWN", "UNVERIFIED", "FAILED", "REJECTED", "ORDER_CREATED", "NOT_ATTEMPTED"]);
 
   function validateDashboardData(data) {
     if (!isRecord(data) || data.schema_version !== 1 || data.source_status !== "UNVERIFIED") return false;
@@ -86,12 +99,20 @@
     if (trx.authentication_status !== "UNKNOWN" || trx.policy_status !== "UNKNOWN") return false;
     if (typeof trx.delivery_status !== "string" || !DELIVERY_STATUSES.has(trx.delivery_status)) return false;
     if (!Array.isArray(data.audit_trail)) return false;
-
+    if (data.timestamp !== null) {
+      if (typeof data.timestamp !== "string") return false;
+      const timestampMs = Date.parse(data.timestamp);
+      const now = Date.now();
+      if (!Number.isFinite(timestampMs) || timestampMs > now + MAX_FUTURE_SKEW_MS ||
+          now - timestampMs > MAX_DATA_AGE_MS) return false;
+    } else if (trx.order_id !== null || trx.merchant !== null || trx.total !== null || data.audit_trail.length > 0) {
+      return false;
+    }
     return data.audit_trail.every(item =>
       isRecord(item) &&
-      typeof item.waktu === "string" &&
-      typeof item.event === "string" &&
-      typeof item.hasil === "string"
+      typeof item.waktu === "string" && item.waktu.length <= 64 &&
+      typeof item.event === "string" && item.event.length > 0 && item.event.length <= 200 &&
+      typeof item.hasil === "string" && AUDIT_RESULTS.has(item.hasil)
     );
   }
 
@@ -165,9 +186,9 @@
         const time = document.createElement("span");
         time.textContent = "[" + item.waktu + "] ";
         const event = document.createElement("span");
-        event.textContent = item.event + " → ";
+        event.textContent = "UNVERIFIED CLAIM · " + item.event + " → ";
         const result = document.createElement("strong");
-        result.textContent = item.hasil;
+        result.textContent = "UNVERIFIED CLAIM · " + item.hasil;
         row.append(time, event, result);
         auditArea.appendChild(row);
       });
@@ -197,7 +218,7 @@
     if (!/^[0-9a-f]{40}$/.test(metaSha) || visibleSha !== metaSha) {
       throw new Error("Dashboard build identity is missing or inconsistent");
     }
-    const response = await fetch("build-info.json", {
+    const response = await fetchWithTimeout("build-info.json", {
       cache: "no-store",
       headers: { "Accept": "application/json", "Cache-Control": "no-cache" }
     });
@@ -213,7 +234,7 @@
   }
 
   verifyBuildIdentity()
-    .then(() => fetch("hasil.json", {
+    .then(() => fetchWithTimeout("hasil.json", {
       cache: "no-store",
       headers: { "Accept": "application/json", "Cache-Control": "no-cache" }
     }))
