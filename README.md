@@ -47,13 +47,13 @@ PayPal AI Trust Engine explores a layered approach to this problem through **Tru
 | Dashboard Hosting | GitHub Pages |
 | License | MIT |
 
-## Live Demo
+## Dashboard Preview and Deployment Status
 
-**Explore the deployed monitoring dashboard:**
+The dashboard source and build checks are available in this repository. The public GitHub Pages URL is provided as a navigation target, **not as a claim that the current deployed artifact has been verified**:
 
-[Open the PayPal AI Trust Engine Live Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)
+[Open the PayPal AI Trust Engine Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)
 
-The dashboard provides a visual overview of the security modules, transaction-related information, statistics, and audit-oriented monitoring data exposed by the project.
+The dashboard consumes static JSON and cannot establish authenticated backend telemetry or prove a live transaction. A public deployment is verified only after the release workflow confirms that the published manifest, index, dashboards, and data all match the intended commit.
 
 **Source Code:** [GitHub Repository](https://github.com/antonytampubolon2-cell/paypal-ai-trust-engine-v2)
 
@@ -163,19 +163,11 @@ This integration is intended for controlled testing in the PayPal Sandbox, not f
 
 ## Transaction Evidence
 
-The following PayPal Sandbox Order IDs are provided as references for judging and review.
+No independently verified PayPal order identifiers are published as evidence in this repository. Backend regression tests use a mocked adapter and synthetic identifiers; those fixtures are not PayPal transaction evidence. No real or Sandbox order/capture was performed as part of this hardening work.
 
-| # | PayPal Sandbox Order ID |
-|---|---|
-| 1 | `7R3064957MB0759941` |
-| 2 | `3HD92730V0626752B` |
-| 3 | `8RJ05941XL2772705` |
+A genuine Sandbox order should be claimed only when it can be retrieved from the intended Sandbox account and its response is reviewed. Even then, order creation does not prove payment capture or settlement.
 
-These identifiers are references supplied for the project demonstration. Their availability and associated transaction details may depend on the Sandbox account and credentials used during review.
-
-PayPal Sandbox is a simulated testing environment. Orders created there are test resources and are separate from live payment activity.
-
-For additional information, consult the official [PayPal Sandbox Testing Guide](https://developer.paypal.com/sandbox-testing/overview/).
+For Sandbox concepts, consult the official [PayPal Sandbox Testing Guide](https://developer.paypal.com/sandbox-testing/overview/).
 
 ---
 
@@ -239,10 +231,10 @@ source .venv/bin/activate
 
 ```bash
 python -m pip install --upgrade pip
-pip install paypal-agent-toolkit openai-agents
+python -m pip install -r requirements-security.txt
 ```
 
-Use a compatible Python environment and resolve any dependency errors before proceeding.
+The hardened verification path does not initialize PayPal Agent Toolkit on import. Do not install or configure a real payment adapter merely to run the local security tests.
 
 ---
 
@@ -281,26 +273,29 @@ The current implementation demonstrates several useful concepts, but it should n
 
 Known limitations include:
 
-- KYAPay verification is performed against synthetic payloads and selected claims; it is not a complete external identity-verification service.
-- Token and DPoP replay caches are in-memory and process-local.
-- The DPoP demonstration checks selected fields and JWK binding but does not verify the full DPoP proof signature.
+- The JWT verifier requires authoritative KYAPay issuer, audience, algorithm, public-key/JWKS and delegation-schema details that are not supplied by this repository.
+- SQLite replay protection is atomic and persistent only when configured on a persistent single host; it is not a distributed multi-instance replay service.
+- Spending limits are enforced per transaction; there is no atomic cumulative-spend reservation/ledger across concurrent transactions.
+- Provider idempotency and reconciliation for ambiguous order responses are not implemented. The dispatcher reports ambiguous outcomes as UNKNOWN and must not automatically retry.
+- DPoP has core signature and binding checks but has not passed a full RFC 9449 interoperability suite; issuer/client nonce and canonicalization requirements remain to be confirmed.
 - The FRP dashboard panel is not evidence of a complete backend fraud-scoring system.
-- The end-to-end workflow uses test authorization data and PayPal Sandbox.
-- Production deployment would require comprehensive validation, persistent replay protection, secure key management, robust audit logging, monitoring, rate limiting, and additional testing.
+- The static dashboard is untrusted presentation data, not authenticated backend telemetry.
+- No official provider interoperability test has been performed. Regression tests use synthetic keys and a mocked adapter.
 
-These limitations define the current prototype scope and provide a foundation for further development.
+These limitations define the current prototype scope and block any production-readiness claim.
 
 ## Roadmap
 
 Potential next steps include:
 
-- Implementing complete cryptographic DPoP proof validation and applicable RFC 9449 checks.
-- Integrating a persistent, shared anti-replay store with defined expiration and concurrency behavior.
-- Strengthening authorization-policy evaluation for issuer, audience, merchant permissions, spending limits, and delegation rules.
-- Connecting the FRP monitoring panel to a fully implemented and validated risk-scoring backend.
-- Expanding automated tests for replay, expired grants, mismatched keys, unauthorized merchants, and spending-limit violations.
-- Improving auditability and operational monitoring.
-- Adding deployment and credential-management guidance suitable for a production environment.
+- Obtain and validate the official KYAPay issuer/token/delegation contract and key-rotation policy.
+- Confirm the official mapping between delegated merchant identities and PayPal merchant IDs.
+- Deploy a shared atomic replay store and implement cumulative-spend reservation with concurrency-safe accounting.
+- Confirm PayPal Orders v2 payload and idempotency/reconciliation behavior against official documentation and an authorized Sandbox integration.
+- Run a full RFC 9449 interoperability suite with the real issuer/client protocol, including nonce policy where applicable.
+- Connect the FRP panel to a fully implemented and validated risk-scoring backend.
+- Add authenticated backend telemetry and signed/otherwise trusted audit evidence for dashboard consumption.
+- Verify GitHub Pages source, environment reviewers, branch restrictions, and rollback procedures before any authorized deployment.
 
 ---
 
