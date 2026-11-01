@@ -117,6 +117,18 @@ def process_payment_request(
         }
     params = {"intent": "AUTHORIZE", "purchase_units": [purchase_unit]}
 
+    # Do not call a generic adapter that cannot explicitly bind the stable request
+    # key to PayPal's provider idempotency contract. This is a local adapter
+    # interface; a real implementation must map request_id to PayPal-Request-Id.
+    create_order_idempotently = getattr(paypal_api, "create_order_with_idempotency", None)
+    if not callable(create_order_idempotently):
+        return result(
+            "PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED",
+            "PayPal adapter lacks the explicit provider-idempotency contract; dispatch failed closed.",
+        )
+    if not isinstance(reservation_idempotency_key, str) or not reservation_idempotency_key or len(reservation_idempotency_key) > 108:
+        return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Provider idempotency key is invalid.")
+
     # The issuer's grant identifier is not inferred from an unconfirmed claim name.
     # The integration layer must supply a stable authoritative identifier and
     # stable caller idempotency key. Without both, payment dispatch is disabled.
@@ -159,7 +171,7 @@ def process_payment_request(
         return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", f"Atomic spend reservation failed closed ({type(exc).__name__}).")
 
     try:
-        response = paypal_api.run(method="create_order", params=params)
+        response = create_order_idempotently(params=params, request_id=reservation_idempotency_key)
         if not isinstance(response, Mapping) or not isinstance(response.get("id"), str) or not response["id"]:
             spend_reservation_store.mark_unknown(reservation.reservation_id)
             return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "PayPal adapter returned no verifiable order identifier; reconciliation is required.")
