@@ -1,4 +1,4 @@
-import os, tempfile, threading, time, unittest, json, hashlib, base64
+import os, tempfile, threading, time, unittest, json, hashlib, base64, subprocess, sys
 from pathlib import Path
 from decimal import Decimal
 import jwt
@@ -90,6 +90,26 @@ class SecurityTests(unittest.TestCase):
         threads=[threading.Thread(target=run) for _ in range(8)]
         [t.start() for t in threads]; [t.join() for t in threads]
         self.assertEqual(sum(outcomes),1)
+    def test_replay_claim_has_one_winner_across_processes(self):
+        shared_path = str(Path(self.tmp.name) / "cross-process-replay.sqlite3")
+        expiry = time.time() + 60
+        code = (
+            "import sys; from trustguard_security import SQLiteReplayStore; "
+            "s=SQLiteReplayStore(sys.argv[1]); "
+            "print(int(s.claim_once('cross-process','same-jti',float(sys.argv[2]))))"
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", code, shared_path, str(expiry)],
+                cwd=str(Path(__file__).resolve().parent),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for _ in range(8)
+        ]
+        outputs = [process.communicate(timeout=20) for process in processes]
+        self.assertTrue(all(process.returncode == 0 for process in processes), outputs)
+        self.assertEqual(sum(int(stdout.strip()) for stdout, _ in outputs), 1)
+
     def test_dict_proof_rejected(self):
         self.assertFalse(verify_dpop_proof({"htm":"POST"},expected_method="POST",expected_url="https://example.test/pay",replay_store=self.store).allowed)
 
