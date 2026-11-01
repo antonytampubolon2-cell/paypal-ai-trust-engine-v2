@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -19,6 +20,79 @@ from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit
 
 import jwt
+
+
+
+
+# Deliberately narrow allowlist: ISO 4217 minor units for currencies this
+# adapter has explicitly elected to support. Expand only after PayPal/KYAPay
+# contracts and merchant-account capabilities are verified.
+SUPPORTED_CURRENCY_MINOR_UNITS = {
+    "USD": 2, "EUR": 2, "GBP": 2, "CAD": 2, "AUD": 2,
+    "JPY": 0, "KRW": 0, "BHD": 3, "KWD": 3,
+}
+
+
+@dataclass(frozen=True)
+class CanonicalTransaction:
+    """Validated immutable transaction used for both policy and PayPal payload."""
+    merchant: str
+    paypal_merchant_id: str
+    amount: Decimal
+    currency: str
+    description: str = "Authorized transaction"
+
+    @property
+    def amount_text(self) -> str:
+        return format(self.amount, f".{SUPPORTED_CURRENCY_MINOR_UNITS[self.currency]}f")
+
+    def as_policy_mapping(self) -> Mapping[str, Any]:
+        return {"merchant": self.merchant, "amount": self.amount, "currency": self.currency}
+
+
+def canonicalize_transaction(
+    transaction: Mapping[str, Any], *, merchant_mapping: Mapping[str, str]
+) -> CanonicalTransaction:
+    """Validate and freeze money and explicit internal-merchant -> PayPal ID mapping.
+
+    The source merchant is a delegation identity, never implicitly a PayPal ID.
+    """
+    if not isinstance(transaction, Mapping):
+        raise ValueError("Transaction must be a mapping.")
+    merchant = transaction.get("merchant")
+    currency = transaction.get("currency")
+    raw_amount = transaction.get("amount")
+    if not isinstance(merchant, str) or not merchant.strip():
+        raise ValueError("Transaction merchant is required.")
+    if not isinstance(currency, str) or currency not in SUPPORTED_CURRENCY_MINOR_UNITS:
+        raise ValueError("Transaction currency is unsupported.")
+    if isinstance(raw_amount, bool) or not isinstance(raw_amount, (str, int, Decimal)):
+        raise ValueError("Transaction amount must be a decimal string, integer, or Decimal.")
+    try:
+        amount = Decimal(str(raw_amount))
+    except (InvalidOperation, ValueError):
+        raise ValueError("Transaction amount is malformed.") from None
+    if not amount.is_finite():
+        raise ValueError("Transaction amount must be finite.")
+    if amount <= 0:
+        raise ValueError("Transaction amount must be greater than zero.")
+    minor_units = SUPPORTED_CURRENCY_MINOR_UNITS[currency]
+    if amount.as_tuple().exponent < -minor_units:
+        raise ValueError(f"Amount has more decimal places than {currency} permits.")
+    # Normalize without rounding; the exponent check above makes this exact.
+    amount = amount.quantize(Decimal(1).scaleb(-minor_units))
+    if not isinstance(merchant_mapping, Mapping):
+        raise ValueError("An explicit merchant mapping is required.")
+    paypal_merchant_id = merchant_mapping.get(merchant)
+    if not isinstance(paypal_merchant_id, str) or not paypal_merchant_id.strip():
+        raise ValueError("No verified PayPal merchant ID mapping exists for this merchant.")
+    # Require an explicit PayPal merchant identifier format; do not derive from name/token.
+    if paypal_merchant_id != paypal_merchant_id.strip():
+        raise ValueError("PayPal merchant ID mapping is malformed.")
+    description = transaction.get("description", "Authorized transaction")
+    if not isinstance(description, str):
+        raise ValueError("Transaction description must be a string.")
+    return CanonicalTransaction(merchant, paypal_merchant_id, amount, currency, description)
 
 
 class SecurityConfigurationError(RuntimeError):
@@ -89,17 +163,30 @@ class PolicyResult:
 
 @dataclass(frozen=True)
 class PaymentResult:
-    """Report independent security and delivery outcomes.
+    """Backward-compatible, independent security and transaction lifecycle statuses.
 
-    ORDER_CREATED means only that PayPal returned an order identifier.
-    It must never be interpreted as payment success, authorization completion,
-    capture, settlement, or fulfillment. Delivery statuses intentionally exclude
-    SUCCEEDED to prevent order creation from being conflated with payment success.
+    Legacy policy_status and delivery_status remain available. New callers should
+    use authorization_status and order_status. ORDER_CREATED means only that PayPal
+    returned an order identifier; capture remains NOT_ATTEMPTED because this
+    dispatcher never captures payments.
     """
     authentication_status: str
     policy_status: str
     delivery_status: Literal["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"]
     reason: str = ""
+    dpop_status: str = "NOT_RUN"
+    authorization_status: str = "NOT_RUN"
+    order_status: Literal["NOT_ATTEMPTED", "FAILED", "UNKNOWN", "ORDER_CREATED"] = "NOT_ATTEMPTED"
+    capture_status: Literal["NOT_ATTEMPTED"] = "NOT_ATTEMPTED"
+
+    def __post_init__(self) -> None:
+        # Keep legacy and explicit order/authorization fields coherent.
+        if self.authorization_status == "NOT_RUN" and self.policy_status != "NOT_RUN":
+            object.__setattr__(self, "authorization_status", self.policy_status)
+        if self.order_status == "NOT_ATTEMPTED" and self.delivery_status != "NOT_ATTEMPTED":
+            object.__setattr__(self, "order_status", self.delivery_status)
+        if self.delivery_status != self.order_status:
+            object.__setattr__(self, "delivery_status", self.order_status)
 
 
 def _required_env(name: str) -> str:
@@ -134,6 +221,11 @@ def authenticate_kyapay_jwt(compact_token: str) -> AuthenticationResult:
             options={"require": ["iss", "sub", "aud", "exp", "jti", "delegation_grant"]},
             leeway=0,
         )
+        exp = claims.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
+            return AuthenticationResult(False, reason="Token exp must be a finite NumericDate.")
+        if not isinstance(claims.get("sub"), str) or not claims["sub"].strip():
+            return AuthenticationResult(False, reason="A non-empty sub claim is required.")
         if not isinstance(claims.get("delegation_grant"), dict):
             return AuthenticationResult(False, reason="delegation_grant must be an object.")
         if not isinstance(claims.get("jti"), str) or not claims["jti"]:
@@ -141,7 +233,7 @@ def authenticate_kyapay_jwt(compact_token: str) -> AuthenticationResult:
         return AuthenticationResult(True, claims=claims, reason="Signature and registered claims verified.")
     except SecurityConfigurationError as exc:
         return AuthenticationResult(False, reason=str(exc))
-    except (jwt.PyJWTError, TypeError, ValueError) as exc:
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as exc:
         # Do not leak token contents, keys, or detailed parser errors to callers.
         return AuthenticationResult(False, reason=f"Token authentication failed ({type(exc).__name__}).")
 
@@ -225,8 +317,12 @@ def verify_dpop_proof(
             expected_jkt = access_token_claims.get("cnf", {}).get("jkt") if isinstance(access_token_claims.get("cnf"), dict) else None
             if not expected_jkt or expected_jkt != thumbprint:
                 return PolicyResult(False, "DPoP key thumbprint does not match token cnf.jkt.")
-        if not replay_store.claim_once("dpop", jti, now + max_age_seconds):
-            return PolicyResult(False, "DPoP proof replay detected.")
+        try:
+            claimed = replay_store.claim_once("dpop", jti, now + max_age_seconds)
+        except Exception:
+            return PolicyResult(False, "DPoP replay storage failed closed.")
+        if not claimed:
+            return PolicyResult(False, "DPoP proof replay detected or replay storage unavailable.")
         return PolicyResult(True, "DPoP signature and proof bindings verified.")
     except (jwt.PyJWTError, TypeError, ValueError, KeyError) as exc:
         return PolicyResult(False, f"DPoP verification failed ({type(exc).__name__}).")
@@ -234,7 +330,7 @@ def verify_dpop_proof(
 
 def authorize_delegated_transaction(
     claims: Mapping[str, Any],
-    transaction: Mapping[str, Any],
+    transaction: Mapping[str, Any] | CanonicalTransaction,
     replay_store: ReplayStore,
     *,
     now: float | None = None,
@@ -245,13 +341,20 @@ def authorize_delegated_transaction(
         grant = claims.get("delegation_grant")
         if not isinstance(grant, dict):
             return PolicyResult(False, "delegation_grant is missing or invalid.")
-        merchant = transaction.get("merchant")
-        amount = Decimal(str(transaction.get("amount")))
-        currency = transaction.get("currency")
+        if isinstance(transaction, CanonicalTransaction):
+            merchant = transaction.merchant
+            amount = transaction.amount
+            currency = transaction.currency
+        else:
+            merchant = transaction.get("merchant")
+            amount = Decimal(str(transaction.get("amount")))
+            currency = transaction.get("currency")
         allowed_merchants = grant.get("allowed_merchants")
         max_spend = Decimal(str(grant.get("max_spend")))
         grant_currency = grant.get("currency")
         valid_until = float(grant.get("valid_until"))
+        if not math.isfinite(valid_until):
+            return PolicyResult(False, "Delegation grant expiry must be a finite timestamp.")
         if not isinstance(merchant, str) or not merchant:
             return PolicyResult(False, "Transaction merchant is required.")
         if not isinstance(allowed_merchants, list) or merchant not in allowed_merchants:
@@ -265,22 +368,54 @@ def authorize_delegated_transaction(
         if valid_until <= now:
             return PolicyResult(False, "Delegation grant has expired.")
         token_exp = float(claims.get("exp"))
-        if token_exp <= now:
+        if not math.isfinite(token_exp) or token_exp <= now:
             return PolicyResult(False, "Authorization token has expired.")
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti:
             return PolicyResult(False, "Token jti is required.")
-        if not replay_store.claim_once("kyapay", jti, token_exp):
-            return PolicyResult(False, "Token replay detected.")
+        try:
+            claimed = replay_store.claim_once("kyapay", jti, token_exp)
+        except Exception:
+            return PolicyResult(False, "Token replay storage failed closed.")
+        if not claimed:
+            return PolicyResult(False, "Token replay detected or replay storage unavailable.")
         return PolicyResult(True, "Delegation policy and token replay checks passed.")
     except (InvalidOperation, TypeError, ValueError, OverflowError):
         return PolicyResult(False, "Transaction or delegation fields are malformed.")
 
 
 def validate_canonical_url(url: str) -> bool:
-    """Utility for callers constructing expected DPoP htu values."""
+    """Accept only canonical HTTPS DPoP htu URIs (RFC 9449 URI normalization).
+
+    Query, fragment, user-info, uppercase hosts, and an explicit default HTTPS
+    port are rejected rather than silently normalized. Callers must construct
+    the canonical htu before invoking the verifier.
+    """
+    if not isinstance(url, str) or not url or any(ord(ch) < 0x20 for ch in url):
+        return False
     try:
         parsed = urlsplit(url)
-        return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.query and not parsed.fragment
-    except ValueError:
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.hostname
+            or parsed.hostname != parsed.hostname.lower()
+        ):
+            return False
+        port = parsed.port
+        if port == 443:
+            return False
+        host = parsed.hostname
+        authority = f"[{host}]" if ":" in host else host
+        if port is not None:
+            authority = f"{authority}:{port}"
+        path = parsed.path or "/"
+        if not path.startswith("/"):
+            return False
+        return url == f"https://{authority}{path}"
+    except (TypeError, ValueError):
         return False
