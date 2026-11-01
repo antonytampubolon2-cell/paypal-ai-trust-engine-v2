@@ -86,5 +86,31 @@ class ReleasePipelineTests(unittest.TestCase):
                 self.assertIn('fetchWithTimeout("hasil.json"', text)
 
 
+    def test_all_workflow_actions_are_immutable_and_known_pins_match_upstream_tags(self):
+        workflow_dir = ROOT / ".github" / "workflows"
+        workflows = sorted(workflow_dir.glob("*.yml"))
+        self.assertEqual(len(workflows), 6, "The six reviewed workflows must remain present")
+        expected_pins = {
+            "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/setup-python": "6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
+            "actions/upload-pages-artifact": "56afc609e74202658d3ffba0e8f6dda462b719fa",
+            "actions/deploy-pages": "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+        }
+        seen = set()
+        for workflow in workflows:
+            for line in workflow.read_text(encoding="utf-8").splitlines():
+                if re.match(r"^\\s*uses\\s*:", line):
+                    match = re.match(r"^\\s*uses\\s*:\\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\\s*$", line)
+                    self.assertIsNotNone(match, f"{workflow.name}: action must use an immutable 40-character SHA: {line.strip()}")
+                    action, sha = match.groups()
+                    seen.add(action)
+                    if action in expected_pins:
+                        self.assertEqual(sha, expected_pins[action], f"{workflow.name}: unexpected reviewed SHA for {action}")
+        self.assertTrue(set(expected_pins).issubset(seen))
+
+    def test_integrated_workflow_runs_spend_reservation_regressions(self):
+        workflow = ROOT / ".github" / "workflows" / "system-integration-tests.yml"
+        self.assertIn("spend_reservations_tests", workflow.read_text(encoding="utf-8"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
