@@ -3,41 +3,32 @@ import jwt
 import math
 from urllib.parse import urlsplit, urlunsplit
 
-# Kredensial dibaca dari environment, bukan ditulis di kode.
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET")
-
 toolkit = None
 tools = []
 
-if PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET:
+
+def initialize_paypal_toolkit():
+    """Initialize the sandbox toolkit only after explicit local authorization."""
+    client_id = os.getenv("PAYPAL_CLIENT_ID", "").strip()
+    client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        return None
     from paypal_agent_toolkit.openai.toolkit import PayPalToolkit
     from paypal_agent_toolkit.shared.configuration import Configuration, Context
-
     configuration = Configuration(
-        actions={
-            "orders": {
-                "create": True,
-                "get": True,
-                "capture": False
-            }
-        },
-        context=Context(sandbox=True)
+        actions={"orders": {"create": True, "get": True, "capture": False}},
+        context=Context(sandbox=True),
+    )
+    return PayPalToolkit(
+        client_id=client_id,
+        secret=client_secret,
+        configuration=configuration,
     )
 
-    toolkit = PayPalToolkit(
-        client_id=PAYPAL_CLIENT_ID,
-        secret=PAYPAL_CLIENT_SECRET,
-        configuration=configuration
-    )
 
-    tools = toolkit.get_tools()
-    print("PayPal Agent Toolkit berhasil diinisialisasi.")
-    print(f"Jumlah tools tersedia: {len(tools)}")
-else:
-    print("Mode aman: kredensial belum dikonfigurasi.")
-    print("PayPal belum diinisialisasi.")
-    # ==========================================
+# ==========================================
 # MODUL KEAMANAN: TRUSTGUARD AGENT
 # ==========================================
 
