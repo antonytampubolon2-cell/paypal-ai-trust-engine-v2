@@ -412,4 +412,24 @@ class SecurityTests(unittest.TestCase):
 
 
 
+
+    def test_dpop_expected_url_must_be_canonical_https_uri(self):
+        from trustguard_security import validate_canonical_url
+
+        for url in (
+            "http://example.test/pay",
+            "https://example.test/pay?amount=1",
+            "https://example.test/pay#fragment",
+            "https://user@example.test/pay",
+            "https://EXAMPLE.test/pay",
+            "https://example.test:443/pay",
+            "https://example.test:99999/pay",
+            "https://example.test",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(validate_canonical_url(url))
+        self.assertTrue(validate_canonical_url("https://example.test/pay"))
+        self.assertTrue(validate_canonical_url("https://example.test:8443/pay"))
+        self.assertTrue(validate_canonical_url("https://[2001:db8::1]/pay"))
+
 if __name__=="__main__": unittest.main()
