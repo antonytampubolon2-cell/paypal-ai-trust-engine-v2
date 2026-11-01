@@ -73,5 +73,22 @@ class PayPalRestItemsTests(unittest.TestCase):
                     normalize_rest_items([item], currency="USD", approved_amount=Decimal("5.00"))
 
 
+
+    def test_extreme_or_non_decimal_values_fail_closed(self):
+        quantity = "9" * 129
+        item = dict(self.items[0], quantity=quantity)
+        with self.assertRaises(RestItemValidationError):
+            normalize_rest_items([item], currency="USD", approved_amount=Decimal("10.00"))
+
+        for value in ("1e999", "9" * 129, " 5.00", "NaN", "Infinity"):
+            item = [{
+                "name": "Test item",
+                "quantity": "1",
+                "unit_amount": {"currency_code": "USD", "value": value},
+            }]
+            with self.subTest(value=value[:20]):
+                with self.assertRaises(RestItemValidationError):
+                    normalize_rest_items(item, currency="USD", approved_amount=Decimal("5.00"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
