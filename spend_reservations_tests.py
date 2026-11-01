@@ -78,6 +78,9 @@ class SpendReservationTests(unittest.TestCase):
         self.store.mark_unknown(r.reservation_id)
         restarted = SQLiteSpendReservationStore(self.path, deployment_mode="single-host")
         self.assertEqual(restarted.get(r.reservation_id).status, "RECONCILIATION_REQUIRED")
+        recovered = restarted.get_by_idempotency_key("issuer-grant-1", "unknown")
+        self.assertEqual(recovered.reservation_id, r.reservation_id)
+        self.assertEqual(recovered.status, "RECONCILIATION_REQUIRED")
         with self.assertRaises(ReservationError):
             restarted.reserve(grant_id="issuer-grant-1", max_spend="100.00", amount="61.00",
                               currency="USD", idempotency_key="over-limit", expires_at=9999999999)
