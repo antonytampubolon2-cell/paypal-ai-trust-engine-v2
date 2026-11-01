@@ -6,7 +6,7 @@ create orders, and does not infer or synthesize merchant identity.
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any, Mapping
 
 from trustguard_security import SUPPORTED_CURRENCY_MINOR_UNITS
@@ -56,6 +56,9 @@ def normalize_rest_items(
             or isinstance(quantity, str) and re.fullmatch(r"[1-9][0-9]*", quantity)
         ):
             raise RestItemValidationError(f"rest_items[{index}].quantity must be a positive integer.")
+        quantity_text = str(quantity)
+        if len(quantity_text) > 128:
+            raise RestItemValidationError(f"rest_items[{index}].quantity is too large to validate safely.")
         quantity_int = int(quantity)
         if not isinstance(unit, Mapping) or set(unit) != {"currency_code", "value"}:
             raise RestItemValidationError(f"rest_items[{index}].unit_amount has an invalid schema.")
@@ -64,14 +67,19 @@ def normalize_rest_items(
         raw_value = unit.get("value")
         if not isinstance(raw_value, (str, int)) or isinstance(raw_value, bool):
             raise RestItemValidationError(f"rest_items[{index}].unit_amount.value must be a decimal string or integer.")
+        raw_text = str(raw_value)
+        if len(raw_text) > 128 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw_text):
+            raise RestItemValidationError(f"rest_items[{index}].unit_amount.value is malformed.")
         try:
-            unit_amount = Decimal(str(raw_value))
-        except (InvalidOperation, ValueError):
-            raise RestItemValidationError(f"rest_items[{index}].unit_amount.value is malformed.") from None
-        if not unit_amount.is_finite() or unit_amount <= 0 or unit_amount.as_tuple().exponent < -minor_units:
-            raise RestItemValidationError(f"rest_items[{index}].unit_amount.value is invalid for {currency}.")
-        unit_amount = unit_amount.quantize(Decimal(1).scaleb(-minor_units))
-        total += unit_amount * quantity_int
+            unit_amount = Decimal(raw_text)
+            if not unit_amount.is_finite() or unit_amount <= 0 or unit_amount.as_tuple().exponent < -minor_units:
+                raise RestItemValidationError(f"rest_items[{index}].unit_amount.value is invalid for {currency}.")
+            with localcontext() as context:
+                context.prec = 512
+                unit_amount = unit_amount.quantize(Decimal(1).scaleb(-minor_units))
+                total += unit_amount * quantity_int
+        except (InvalidOperation, ValueError, OverflowError):
+            raise RestItemValidationError(f"rest_items[{index}].unit_amount.value cannot be represented safely.") from None
 
         entry: dict[str, Any] = {
             "name": name.strip(),
