@@ -218,7 +218,7 @@
     if (!/^[0-9a-f]{40}$/.test(metaSha) || visibleSha !== metaSha) {
       throw new Error("Dashboard build identity is missing or inconsistent");
     }
-    const response = await fetch("build-info.json", {
+    const response = await fetchWithTimeout("build-info.json", {
       cache: "no-store",
       headers: { "Accept": "application/json", "Cache-Control": "no-cache" }
     });
@@ -234,7 +234,7 @@
   }
 
   verifyBuildIdentity()
-    .then(() => fetch("hasil.json", {
+    .then(() => fetchWithTimeout("hasil.json", {
       cache: "no-store",
       headers: { "Accept": "application/json", "Cache-Control": "no-cache" }
     }))
