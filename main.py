@@ -486,6 +486,7 @@ class TrustGuardAgent:
 # INTEGRASI END-TO-END: TRUSTGUARD + PAYPAL
 # ==========================================
 def normalize_toolkit_items(items, currency):
+    """Normalize local item inputs to the PayPal Orders v2 item schema."""
     from decimal import Decimal, InvalidOperation
 
     if currency != "USD":
@@ -497,7 +498,6 @@ def normalize_toolkit_items(items, currency):
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("Format item tidak valid.")
-
         name = item.get("name")
         qty = item.get("quantity", 1)
         raw = item.get("item_cost", item.get("unit_price"))
@@ -505,12 +505,10 @@ def normalize_toolkit_items(items, currency):
             raw = item.get("unit_amount")
             if isinstance(raw, dict):
                 raw = raw.get("value")
-
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("Nama item wajib diisi.")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 127:
+            raise ValueError("Nama item wajib diisi dan maksimal 127 karakter.")
         if isinstance(qty, bool) or not isinstance(qty, int) or not 1 <= qty <= 10000:
             raise ValueError("Kuantitas harus berupa bilangan bulat 1-10000.")
-
         try:
             cost = Decimal(str(raw))
             tax = Decimal(str(item.get("tax_percent", 0)))
@@ -518,91 +516,80 @@ def normalize_toolkit_items(items, currency):
             given_total = Decimal(str(given_total)) if given_total is not None else None
         except (InvalidOperation, ValueError, TypeError):
             raise ValueError("Harga, total, atau pajak tidak valid.") from None
-
-        if not cost.is_finite() or cost <= 0 or cost != cost.quantize(Decimal("0.01")):
+        if not cost.is_finite() or cost <= 0 or cost.as_tuple().exponent < -2:
             raise ValueError("Harga harus positif dan maksimal dua desimal.")
         if not tax.is_finite() or tax != 0:
             raise ValueError("Prototipe ini hanya mendukung pajak 0%.")
-
         total = (cost * qty).quantize(Decimal("0.01"))
-        if given_total is not None and (
-            not given_total.is_finite() or given_total != total
-        ):
+        if given_total is not None and (not given_total.is_finite() or given_total != total):
             raise ValueError("Total item tidak cocok dengan harga dan kuantitas.")
-
         output.append({
             "name": name.strip(),
-            "quantity": qty,
-            "item_cost": float(cost),
-            "tax_percent": 0.0,
-            "item_total": float(total),
+            "quantity": str(qty),
+            "unit_amount": {
+                "currency_code": currency,
+                "value": format(cost.quantize(Decimal("0.01")), ".2f"),
+            },
         })
-
     return output
 
 
 def execute_safe_payment(agent, token_jwt, dpop_proof, method, url, currency, items):
+    """Validate then create a PayPal Orders v2 order only; never capture."""
     print("\n" + "="*60)
     print("ALUR END-TO-END: VERIFIKASI TRUSTGUARD -> PAYPAL ORDER")
     print("="*60)
-    
+
     try:
         items = normalize_toolkit_items(items, currency)
     except ValueError as exc:
         print('[E2E] Item tidak valid; diblokir sebelum PayPal.')
         return {'status': 'BLOCKED', 'reason': str(exc)}
 
-    # TAHAP 1: Verifikasi Keamanan Berlapis
     from decimal import Decimal
-    order_total = sum(Decimal(str(item['item_total'])) for item in items)
+    order_total = sum(
+        Decimal(item["unit_amount"]["value"]) * int(item["quantity"])
+        for item in items
+    )
     merchant_id = os.getenv('TRUSTGUARD_MERCHANT_ID', '')
     is_safe = agent.process_payment_request(
         token_jwt, dpop_proof, method, url, order_total, currency, merchant_id
     )
-    
     if not is_safe:
-        print("\n[E2E] ❌ TRANSAKSI DIBLOKIR oleh TrustGuard.")
+        print("[E2E] DITOLAK oleh TrustGuard; PayPal tidak dipanggil.")
         return {"status": "BLOCKED", "reason": "Verifikasi keamanan gagal"}
-    
-    # TAHAP 2: Panggil PayPal create_order (hanya jika aman)
-    print("\n[E2E] ✅ TrustGuard LULUS. Meneruskan ke PayPal create_order...")
-    
+
+    amount_text = format(order_total.quantize(Decimal("0.01")), ".2f")
+    purchase_unit = {
+        "amount": {
+            "currency_code": currency,
+            "value": amount_text,
+            "breakdown": {
+                "item_total": {"currency_code": currency, "value": amount_text}
+            },
+        },
+        "items": items,
+    }
+    params = {"intent": "AUTHORIZE", "purchase_units": [purchase_unit]}
     try:
         paypal_api = agent.toolkit.get_paypal_api()
-        params = {
-    "currency_code": currency,
-    "items": items
-}
-        
         print("[E2E] Memanggil PayPal create_order; parameter disembunyikan.")
         result = paypal_api.run(method="create_order", params=params)
-        
-        print(f"\n[E2E] 📦 RESPONS PAYPAL:")
-        print("[E2E] Respons PayPal diterima; detail disembunyikan.")
-        
         parsed_result = __import__("json").loads(result) if isinstance(result, str) else result
         order_id = parsed_result.get("id") if isinstance(parsed_result, dict) else None
         if not isinstance(order_id, str) or not order_id.strip():
-            print("[E2E] Respons PayPal tidak memuat Order ID.")
-            return {"status": "ERROR", "reason": "Respons PayPal tidak memuat Order ID"}
+            print("[E2E] Respons provider tidak memiliki Order ID yang dapat diverifikasi; status UNKNOWN.")
+            return {"status": "UNKNOWN", "reason": "Respons PayPal tidak memuat Order ID yang dapat diverifikasi"}
         print("[E2E] Order dibuat; pembayaran belum ditangkap.")
-        return {"status": "ORDER_CREATED", "order_id": order_id, "paypal_response": parsed_result}
-    
-    except Exception as e:
-        print(
-            f"\n[E2E] Gagal memanggil PayPal "
-            f"({type(e).__name__})."
-        )
+        return {"status": "ORDER_CREATED", "order_id": order_id}
+    except Exception as exc:
+        print(f"[E2E] Hasil order tidak dapat dipastikan ({type(exc).__name__}); status UNKNOWN.")
         return {
-            "status": "ERROR",
-            "reason": (
-                "Permintaan PayPal gagal. "
-                "Detail teknis tidak ditampilkan."
-            )
+            "status": "UNKNOWN",
+            "reason": "Hasil permintaan PayPal ambigu; jangan mengulang otomatis tanpa rekonsiliasi",
         }
 
 
-# ==========================================
 # UJI COBA END-TO-END PERTAMA DINONAKTIFKAN
 # ==========================================
 # Pengujian transaksi tidak dijalankan otomatis.
