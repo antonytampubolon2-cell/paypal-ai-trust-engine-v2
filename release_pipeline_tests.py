@@ -73,6 +73,15 @@ class ReleasePipelineTests(unittest.TestCase):
                 self.assertIn("actions/checkout@v7", text)
                 self.assertIn("actions/setup-python@v7", text)
 
+    def test_dashboard_fetches_are_timeout_bounded_in_release_candidate(self):
+        for relative in ("dashboard.html", "dashboard_v2.html"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(dashboard=relative):
+                self.assertIn("AbortController", text)
+                self.assertIn("FETCH_TIMEOUT_MS", text)
+                self.assertIn('fetchWithTimeout("build-info.json"', text)
+                self.assertIn('fetchWithTimeout("hasil.json"', text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
