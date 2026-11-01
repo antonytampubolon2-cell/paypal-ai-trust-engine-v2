@@ -1,29 +1,19 @@
+"""Legacy public demo entry point.
+
+This branch's dictionary-based verifier is not an authoritative trust boundary.
+Order dispatch is intentionally disabled here; use the signed verifier boundary
+on codex/security-hardening only after official issuer/provider contracts exist.
+"""
 import os
-from paypal_agent_toolkit.openai.toolkit import PayPalToolkit
-from paypal_agent_toolkit.shared.configuration import Configuration, Context
+import time
+import uuid
 
-# --- MASUKKAN KREDENSIAL BARU ANDA DI SINI ---
-os.environ["PAYPAL_CLIENT_ID"] = "MASUKKAN_CLIENT_ID_ANDA_DI_SINI"
-os.environ["PAYPAL_CLIENT_SECRET"] = "MASUKKAN_SECRET_ANDA_DI_SINI"
-# ---------------------------------------------
+# Do not overwrite environment variables, initialize the toolkit on import,
+# or enable capture from this legacy demonstration.
+toolkit = None
+tools = []
 
-configuration = Configuration(
-    actions={"orders": {"create": True, "get": True, "capture": True}},
-    context=Context(sandbox=True)
-)
-
-toolkit = PayPalToolkit(
-    client_id=os.environ["PAYPAL_CLIENT_ID"],
-    secret=os.environ["PAYPAL_CLIENT_SECRET"],
-    configuration=configuration
-)
-
-tools = toolkit.get_tools()
-print("PayPal Agent Toolkit berhasil diinisialisasi!")
-print(f"Jumlah tools yang tersedia: {len(tools)}")
-for tool in tools:
-    print(f"   - {tool.name}")
-    # ==========================================
+# ==========================================
 # MODUL KEAMANAN: TRUSTGUARD AGENT
 # ==========================================
 
@@ -283,39 +273,16 @@ print(f"Status Akhir: {'BERHASIL' if hasil_akhir else 'GAGAL'}")
 # INTEGRASI END-TO-END: TRUSTGUARD + PAYPAL
 # ==========================================
 def execute_safe_payment(agent, token_payload, dpop_proof, method, url, currency, items):
-    print("\n" + "="*60)
-    print("ALUR END-TO-END: VERIFIKASI TRUSTGUARD -> PAYPAL ORDER")
-    print("="*60)
-    
-    # TAHAP 1: Verifikasi Keamanan Berlapis
-    is_safe = agent.process_payment_request(token_payload, dpop_proof, method, url)
-    
-    if not is_safe:
-        print("\n[E2E] ❌ TRANSAKSI DIBLOKIR oleh TrustGuard.")
-        return {"status": "BLOCKED", "reason": "Verifikasi keamanan gagal"}
-    
-    # TAHAP 2: Panggil PayPal create_order (hanya jika aman)
-    print("\n[E2E] ✅ TrustGuard LULUS. Meneruskan ke PayPal create_order...")
-    
-    try:
-        paypal_api = toolkit.get_paypal_api()
-        params = {
-            "currency_code": currency,
-            "items": items
-        }
-        
-        print(f"[E2E] Memanggil PayPal dengan params: {params}")
-        result = paypal_api.run(method="create_order", params=params)
-        
-        print(f"\n[E2E] 📦 RESPONS PAYPAL:")
-        print(f"{result}")
-        
-        return {"status": "SUCCESS", "paypal_response": result}
-    
-    except Exception as e:
-        print(f"\n[E2E] ❌ Gagal memanggil PayPal: {e}")
-        return {"status": "ERROR", "reason": str(e)}
+    """Fail closed: this legacy branch cannot authorize an external order.
 
+    The local dictionary-based KYAPay/DPoP examples below are synthetic and do
+    not cryptographically authenticate the request. No provider adapter is
+    invoked, regardless of the example's displayed checks.
+    """
+    return {
+        "status": "BLOCKED",
+        "reason": "Legacy demo dispatch disabled: authoritative signed-token and DPoP verification is not wired here.",
+    }
 
 # ==========================================
 # UJI COBA END-TO-END PERTAMA
