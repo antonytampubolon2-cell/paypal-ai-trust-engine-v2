@@ -233,7 +233,7 @@ def authenticate_kyapay_jwt(compact_token: str) -> AuthenticationResult:
         return AuthenticationResult(True, claims=claims, reason="Signature and registered claims verified.")
     except SecurityConfigurationError as exc:
         return AuthenticationResult(False, reason=str(exc))
-    except (jwt.PyJWTError, TypeError, ValueError) as exc:
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as exc:
         # Do not leak token contents, keys, or detailed parser errors to callers.
         return AuthenticationResult(False, reason=f"Token authentication failed ({type(exc).__name__}).")
 
