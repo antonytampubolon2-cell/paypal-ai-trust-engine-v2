@@ -57,7 +57,7 @@ The tests must pass in CI before review. A passing synthetic test suite does not
 
 ### Precise guarantees and limitations
 
-SQLite `BEGIN IMMEDIATE` serializes reservation writers for processes sharing one persistent local database on a single host. The concurrency test launches 24 simultaneous requests for a grant limit of 100.00 USD at 10.00 USD per request and expects exactly ten reservations to succeed. This does not establish distributed/multi-host safety; that mode remains disabled and requires a shared atomic store.
+SQLite `BEGIN IMMEDIATE` serializes reservation writers for processes sharing one persistent local database on a single host. The store requires an explicit `deployment_mode="single-host"` (or `TRUSTGUARD_DEPLOYMENT_MODE=single-host`) and rejects missing or multi-host mode. The concurrency test launches 24 simultaneous requests for a grant limit of 100.00 USD at 10.00 USD per request and expects exactly ten reservations to succeed. This does not establish distributed/multi-host safety; that mode remains disabled and requires a shared atomic store.
 
 The current PayPal adapter interface does not yet prove provider-level `PayPal-Request-Id` propagation or reconciliation by idempotency key. No automatic retry is performed after ambiguous outcomes. Obtain official integration details and implement a provider adapter with explicit idempotency and lookup/reconciliation behavior before enabling real external transactions.
 
