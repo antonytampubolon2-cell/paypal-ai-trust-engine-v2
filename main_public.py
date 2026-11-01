@@ -19,7 +19,7 @@ from trustguard_security import (
     verify_dpop_proof,
 )
 from paypal_rest import RestItemValidationError, normalize_rest_items
-from spend_reservations import ReservationError, ReservationStorageError, SQLiteSpendReservationStore
+from spend_reservations import SQLiteSpendReservationStore
 
 
 def process_payment_request(
@@ -152,7 +152,7 @@ def process_payment_request(
         if reservation.status != "RESERVED":
             return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Existing reservation is not dispatchable.")
         spend_reservation_store.mark_dispatch_started(reservation.reservation_id)
-    except (ReservationError, ReservationStorageError, Exception):
+    except Exception:
         # The store is part of the security boundary; any storage or policy error
         # prevents the outbound provider request.
         return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Atomic spend reservation failed closed.")
@@ -165,7 +165,10 @@ def process_payment_request(
         try:
             spend_reservation_store.record_order_created(reservation.reservation_id, order_id=response["id"])
         except Exception:
-            spend_reservation_store.mark_unknown(reservation.reservation_id)
+            try:
+                spend_reservation_store.mark_unknown(reservation.reservation_id)
+            except Exception:
+                pass  # The persisted dispatch-started reservation still consumes the grant budget.
             return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "Order response was received but evidence persistence failed; reconciliation is required.")
         return result(
             "PASSED", "PASSED", "PASSED", "ORDER_CREATED",
