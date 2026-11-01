@@ -47,8 +47,8 @@ class SecurityTests(unittest.TestCase):
             self.calls=[]
             self.response=response if response is not None else {"id":"SYNTHETIC-MOCK-ORDER"}
             self.error=error
-        def run(self, **kwargs):
-            self.calls.append(kwargs)
+        def create_order_with_idempotency(self, *, params, request_id):
+            self.calls.append({"method": "create_order", "params": params, "request_id": request_id})
             if self.error:
                 raise self.error
             return self.response
@@ -125,7 +125,9 @@ class SecurityTests(unittest.TestCase):
         proof=jwt.encode({"htm":"POST","htu":"https://example.test/pay","jti":"proof-"+str(time.time_ns()),"iat":now,"ath":ath},dpop_key,algorithm="ES256",headers={"typ":"dpop+jwt","jwk":jwk})
         class MockPayPal:
             def __init__(self): self.calls=[]
-            def run(self,**kwargs): self.calls.append(kwargs); return {"id":"MOCK-ORDER"}
+            def create_order_with_idempotency(self, *, params, request_id):
+                self.calls.append({"method":"create_order","params":params,"request_id":request_id})
+                return {"id":"MOCK-ORDER"}
         mock=MockPayPal()
         result=self.dispatch_request(
             compact_token=token, compact_dpop_proof=proof,
@@ -272,6 +274,21 @@ class SecurityTests(unittest.TestCase):
             merchant_mapping=self.valid_mapping(),
             spend_reservation_store=BrokenSpendStore(), grant_id="synthetic-grant",
             reservation_idempotency_key="stable-test-key",
+        )
+        self.assertEqual(result.order_status, "NOT_ATTEMPTED")
+        self.assertEqual(mock.calls, [])
+
+    def test_adapter_without_provider_idempotency_contract_fails_closed(self):
+        token, proof = self.signed_request()
+        class LegacyAdapter:
+            def __init__(self): self.calls = []
+            def run(self, **kwargs): self.calls.append(kwargs); return {"id": "NOT-ALLOWED"}
+        mock = LegacyAdapter()
+        result = self.dispatch_request(
+            compact_token=token, compact_dpop_proof=proof,
+            transaction=self.valid_transaction(), replay_store=self.store,
+            paypal_api=mock, expected_url="https://example.test/pay",
+            merchant_mapping=self.valid_mapping(),
         )
         self.assertEqual(result.order_status, "NOT_ATTEMPTED")
         self.assertEqual(mock.calls, [])
