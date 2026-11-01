@@ -377,9 +377,37 @@ def authorize_delegated_transaction(
 
 
 def validate_canonical_url(url: str) -> bool:
-    """Utility for callers constructing expected DPoP htu values."""
+    """Accept only canonical HTTPS DPoP htu URIs (RFC 9449 URI normalization).
+
+    Query, fragment, user-info, uppercase hosts, and an explicit default HTTPS
+    port are rejected rather than silently normalized. Callers must construct
+    the canonical htu before invoking the verifier.
+    """
+    if not isinstance(url, str) or not url or any(ord(ch) < 0x20 for ch in url):
+        return False
     try:
         parsed = urlsplit(url)
-        return parsed.scheme == "https" and bool(parsed.netloc) and not parsed.query and not parsed.fragment
-    except ValueError:
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.hostname
+            or parsed.hostname != parsed.hostname.lower()
+        ):
+            return False
+        port = parsed.port
+        if port == 443:
+            return False
+        host = parsed.hostname
+        authority = f"[{host}]" if ":" in host else host
+        if port is not None:
+            authority = f"{authority}:{port}"
+        path = parsed.path or "/"
+        if not path.startswith("/"):
+            return False
+        return url == f"https://{authority}{path}"
+    except (TypeError, ValueError):
         return False
