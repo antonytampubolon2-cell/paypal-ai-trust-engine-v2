@@ -90,5 +90,20 @@ class PayPalRestItemsTests(unittest.TestCase):
                 with self.assertRaises(RestItemValidationError):
                     normalize_rest_items(item, currency="USD", approved_amount=Decimal("5.00"))
 
+
+    def test_extreme_python_integer_values_fail_closed(self):
+        for field, value in (("quantity", 10 ** 2000), ("unit_amount", 10 ** 2000)):
+            item = {
+                "name": "Test item",
+                "quantity": value if field == "quantity" else "1",
+                "unit_amount": {
+                    "currency_code": "USD",
+                    "value": value if field == "unit_amount" else "10.00",
+                },
+            }
+            with self.subTest(field=field):
+                with self.assertRaises(RestItemValidationError):
+                    normalize_rest_items([item], currency="USD", approved_amount=Decimal("10.00"))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
