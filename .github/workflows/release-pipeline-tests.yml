@@ -1,0 +1,32 @@
+name: Release pipeline structure tests
+on:
+  pull_request:
+    branches: [codex/stage-5-3-dashboard-repair]
+  push:
+    branches: [codex/stage-5-3-release-pipeline-final]
+permissions:
+  contents: read
+jobs:
+  release-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Compile Python modules
+        run: python -m compileall -q .
+      - name: Install test dependencies
+        run: python -m pip install pyyaml playwright
+      - name: Install Chromium for artifact/browser tests
+        run: python -m playwright install --with-deps chromium
+      - name: Build exact artifact
+        run: python build_pages.py
+      - name: Validate release gates
+        run: python -m unittest -v release_pipeline_tests
+      - name: Validate frontend contract
+        run: python -m unittest -v frontend_tests
+      - name: Validate Pages artifact
+        run: python -m unittest -v pages_artifact_tests
+      - name: Validate dashboard behavior
+        run: python -m unittest -v frontend_browser_tests
