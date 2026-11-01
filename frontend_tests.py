@@ -46,7 +46,7 @@ class FrontendHardeningTests(unittest.TestCase):
     def test_both_dashboards_consume_the_same_fail_closed_static_data(self):
         for html in (self.dashboard, self.dashboard_v2):
             with self.subTest(dashboard="dashboard_v2" if html is self.dashboard_v2 else "dashboard"):
-                self.assertIn('fetch("hasil.json"', html)
+                self.assertIn('fetchWithTimeout("hasil.json"', html)
                 self.assertIn("source_status", html)
                 self.assertIn("authentication_status", html)
                 self.assertIn("policy_status", html)
@@ -96,7 +96,7 @@ class FrontendHardeningTests(unittest.TestCase):
     def test_both_dashboards_verify_manifest_identity_before_data(self):
         for html in (self.dashboard, self.dashboard_v2):
             with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
-                self.assertIn('fetch("build-info.json"', html)
+                self.assertIn('fetchWithTimeout("build-info.json"', html)
                 self.assertIn('manifest.frontend_commit !== metaSha', html)
                 self.assertIn("function verifyBuildIdentity()", html)
 
