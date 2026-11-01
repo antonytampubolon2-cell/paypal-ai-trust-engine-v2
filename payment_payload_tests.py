@@ -6,6 +6,7 @@ import unittest
 from decimal import Decimal
 
 from main import execute_safe_payment, normalize_toolkit_items
+import main_public
 
 
 class MockPayPalAPI:
@@ -125,6 +126,29 @@ class PayPalOrdersV2PayloadTests(unittest.TestCase):
         self.assertEqual(result["status"], "UNKNOWN")
         self.assertNotIn("order_id", result)
         self.assertEqual(len(api.calls), 1)
+
+    def test_legacy_public_dispatch_is_disabled_even_for_synthetic_success(self):
+        class NeverCallToolkit:
+            def get_paypal_api(self):
+                raise AssertionError("legacy branch must not call PayPal")
+        class Agent:
+            toolkit = NeverCallToolkit()
+            def process_payment_request(self, *args):
+                return True
+        result = main_public.execute_safe_payment(
+            Agent(), {"valid": True}, {"valid": True}, "POST",
+            "https://example.test/pay", "USD", self.items
+        )
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("Legacy demo dispatch disabled", result["reason"])
+
+    def test_legacy_public_entrypoint_has_no_credential_override_or_capture_enablement(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parent / "main_public.py").read_text(encoding="utf-8")
+        self.assertNotIn('os.environ["PAYPAL_CLIENT_ID"] =', source)
+        self.assertNotIn('os.environ["PAYPAL_CLIENT_SECRET"] =', source)
+        self.assertNotIn('"capture": True', source)
+        self.assertNotIn("PayPalToolkit(", source)
 
 
 if __name__ == "__main__":
