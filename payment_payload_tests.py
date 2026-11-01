@@ -150,6 +150,14 @@ class PayPalOrdersV2PayloadTests(unittest.TestCase):
         self.assertNotIn('"capture": True', source)
         self.assertNotIn("PayPalToolkit(", source)
 
+    def test_main_toolkit_initialization_is_lazy_and_confirmation_gated(self):
+        from pathlib import Path
+        source = (Path(__file__).resolve().parent / "main.py").read_text(encoding="utf-8")
+        self.assertIn("def initialize_paypal_toolkit()", source)
+        self.assertIn('"capture": False', source)
+        self.assertLess(source.index("TRUSTGUARD_CONFIRM_SANDBOX_ORDER"),
+                        source.index("toolkit = initialize_paypal_toolkit()"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
