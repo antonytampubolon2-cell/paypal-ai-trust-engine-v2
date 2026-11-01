@@ -85,7 +85,7 @@ class PagesArtifactTests(unittest.TestCase):
             (ROOT.parent / "hasil.json").read_bytes(),
             "artifact must use the repository's unchanged fail-closed static data",
         )
-        self.assertIn('fetch("hasil.json"', self.dashboard_html)
+        self.assertIn('fetchWithTimeout("hasil.json"', self.dashboard_html)
         self.assertIn('fetch("hasil.json"', self.dashboard_v2_html)
         self.assertEqual(self.data.get("source_status"), "UNVERIFIED")
         self.assertEqual(self.data.get("transaksi_terakhir", {}).get("authentication_status"), "UNKNOWN")
