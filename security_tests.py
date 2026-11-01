@@ -294,6 +294,26 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(result.order_status, "NOT_ATTEMPTED")
         self.assertEqual(mock.calls, [])
 
+    def test_prior_dispatch_with_same_idempotency_key_is_not_retried(self):
+        token1, proof1 = self.signed_request()
+        token2, proof2 = self.signed_request()
+        mock = self.MockPayPal()
+        common = {
+            "transaction": self.valid_transaction(),
+            "replay_store": self.store,
+            "paypal_api": mock,
+            "expected_url": "https://example.test/pay",
+            "merchant_mapping": self.valid_mapping(),
+            "grant_id": "synthetic-test-grant",
+            "reservation_idempotency_key": "stable-provider-request-id",
+        }
+        first = self.dispatch_request(compact_token=token1, compact_dpop_proof=proof1, **common)
+        second = self.dispatch_request(compact_token=token2, compact_dpop_proof=proof2, **common)
+        self.assertEqual(first.order_status, "ORDER_CREATED")
+        self.assertEqual(second.order_status, "UNKNOWN")
+        self.assertIn("no automatic retry", second.reason.lower())
+        self.assertEqual(len(mock.calls), 1)
+
     def test_missing_spend_reservation_fails_closed(self):
         token, proof = self.signed_request()
         mock = self.MockPayPal()
