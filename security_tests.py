@@ -432,4 +432,30 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(validate_canonical_url("https://example.test:8443/pay"))
         self.assertTrue(validate_canonical_url("https://[2001:db8::1]/pay"))
 
+
+    def test_non_finite_token_expiry_is_rejected(self):
+        token = self.token(exp=float("nan"))
+        self.assertFalse(authenticate_kyapay_jwt(token).authenticated)
+
+    def test_non_finite_delegation_expiry_is_rejected(self):
+        base = {
+            "exp": time.time() + 100,
+            "jti": "non-finite-expiry-" + str(time.time_ns()),
+            "delegation_grant": {
+                "allowed_merchants": ["merchant-1"],
+                "max_spend": "10",
+                "currency": "USD",
+                "valid_until": "NaN",
+            },
+        }
+        for expiry in ("NaN", "Infinity", "-Infinity"):
+            claims = {**base, "jti": str(time.time_ns()),
+                      "delegation_grant": {**base["delegation_grant"], "valid_until": expiry}}
+            with self.subTest(expiry=expiry):
+                self.assertFalse(
+                    authorize_delegated_transaction(
+                        claims, {"merchant": "merchant-1", "amount": "1", "currency": "USD"}, self.store
+                    ).allowed
+                )
+
 if __name__=="__main__": unittest.main()
