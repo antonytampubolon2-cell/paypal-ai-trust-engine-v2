@@ -93,6 +93,26 @@ class FrontendHardeningTests(unittest.TestCase):
         self.assertIn("belum terhubung", self.dashboard.lower())
         self.assertIn("BELUM DIVERIFIKASI", self.dashboard_v2)
 
+    def test_both_dashboards_verify_manifest_identity_before_data(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
+                self.assertIn('fetch("build-info.json"', html)
+                self.assertIn('manifest.frontend_commit !== metaSha', html)
+                self.assertIn("function verifyBuildIdentity()", html)
+
+    def test_both_dashboards_reject_stale_and_future_timestamps(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
+                self.assertIn("MAX_DATA_AGE_MS", html)
+                self.assertIn("MAX_FUTURE_SKEW_MS", html)
+                self.assertIn("Date.parse", html)
+                self.assertIn("now -", html)
+
+    def test_dynamic_audit_results_are_constrained_and_labelled_unverified(self):
+        self.assertIn("AUDIT_RESULTS.has(item.hasil)", self.dashboard_v2)
+        self.assertIn("UNVERIFIED CLAIM · ", self.dashboard_v2)
+        self.assertIn('allowed.has(item.hasil)', self.dashboard)
+
 
 if __name__ == "__main__":
     unittest.main()
