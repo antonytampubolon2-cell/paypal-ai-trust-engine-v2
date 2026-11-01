@@ -491,7 +491,7 @@ class SecurityTests(unittest.TestCase):
                         direct_sdk_imports.append(node.module)
                 elif isinstance(node, ast.Call):
                     func = node.func
-                    if isinstance(func, ast.Attribute) and func.attr == "create_order_with_idempotency":
+                    if isinstance(func, ast.Name) and func.id == "create_order_idempotently":
                         adapter_calls.append((path.name, node.lineno))
                     if isinstance(func, ast.Attribute) and "capture" in func.attr.lower():
                         capture_calls.append((path.name, node.lineno))
@@ -499,7 +499,7 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(adapter_calls, [("main_public.py", next(
             node.lineno for node in ast.walk(ast.parse((root / "main_public.py").read_text(encoding="utf-8")))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "create_order_with_idempotency"
+            and node.func.id == "create_order_idempotently"
         ))])
         self.assertEqual(capture_calls, [])
 
