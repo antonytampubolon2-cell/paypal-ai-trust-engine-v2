@@ -8,6 +8,7 @@ provider dispatch began is never freed merely because its lease expires.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 import uuid
@@ -49,7 +50,10 @@ class SQLiteSpendReservationStore:
 
     deployment_scope = "single-host-only"
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, deployment_mode: str | None = None) -> None:
+        mode = deployment_mode if deployment_mode is not None else os.getenv("TRUSTGUARD_DEPLOYMENT_MODE")
+        if mode != "single-host":
+            raise ReservationError("SQLite spend reservations require explicit TRUSTGUARD_DEPLOYMENT_MODE=single-host; multi-host mode is unsupported.")
         if not str(path).strip() or str(path) == ":memory:":
             raise ReservationError("A persistent SQLite path is required for durable reservations.")
         self.path = str(path)
