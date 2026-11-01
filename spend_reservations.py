@@ -318,6 +318,17 @@ class SQLiteSpendReservationStore:
         except sqlite3.Error as exc:
             raise ReservationStorageError("Reservation lookup failed; fail closed.") from exc
 
+    def get_by_idempotency_key(self, grant_id: str, idempotency_key: str) -> Reservation | None:
+        """Recover a reservation after restart using the caller's stable request key."""
+        try:
+            with self._connection() as db:
+                row = db.execute("""SELECT reservation_id,grant_id,idempotency_key,amount,currency,status,
+                    expires_at,dispatch_started,provider_reference FROM spend_reservations
+                    WHERE grant_id=? AND idempotency_key=?""", (grant_id, idempotency_key)).fetchone()
+            return self._row(row) if row else None
+        except sqlite3.Error as exc:
+            raise ReservationStorageError("Reservation reconciliation lookup failed; fail closed.") from exc
+
     def committed_and_reserved_total(self, grant_id: str) -> Decimal:
         try:
             with self._connection() as db:
