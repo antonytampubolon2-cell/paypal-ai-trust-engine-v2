@@ -13,7 +13,7 @@ class SpendReservationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "spend.sqlite3"
-        self.store = SQLiteSpendReservationStore(self.path)
+        self.store = SQLiteSpendReservationStore(self.path, deployment_mode="single-host")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -101,9 +101,15 @@ class SpendReservationTests(unittest.TestCase):
         with self.assertRaises(ReservationError):
             self.store.record_order_created(r.reservation_id, order_id="DIFFERENT-ORDER")
 
+    def test_deployment_mode_must_be_explicit_and_single_host(self):
+        with self.assertRaises(ReservationError):
+            SQLiteSpendReservationStore(self.path)
+        with self.assertRaises(ReservationError):
+            SQLiteSpendReservationStore(self.path, deployment_mode="multi-host")
+
     def test_storage_must_be_persistent(self):
         with self.assertRaises(ReservationError):
-            SQLiteSpendReservationStore(":memory:")
+            SQLiteSpendReservationStore(":memory:", deployment_mode="single-host")
 
 
 if __name__ == "__main__":
