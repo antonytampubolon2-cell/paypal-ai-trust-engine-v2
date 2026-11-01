@@ -600,13 +600,18 @@ def main():
         print("[TrustGuard] MODE AMAN; variabel belum diatur: " + ", ".join(missing))
         print("[TrustGuard] Jangan bagikan token atau secret ke chat.")
         return 2
-    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET or toolkit is None:
+    if not PAYPAL_CLIENT_ID or not PAYPAL_CLIENT_SECRET:
         print("[TrustGuard] Kredensial PayPal Sandbox belum siap."); return 2
     if os.getenv("TRUSTGUARD_CONFIRM_SANDBOX_ORDER", "") != "CREATE SANDBOX ORDER":
         print("[TrustGuard] MODE PERSIAPAN: tidak ada order dibuat.")
         print('Untuk mengonfirmasi order Sandbox: set "TRUSTGUARD_CONFIRM_SANDBOX_ORDER=CREATE SANDBOX ORDER"')
         return 0
+    global toolkit, tools
     try:
+        toolkit = initialize_paypal_toolkit()
+        if toolkit is None:
+            print("[TrustGuard] Toolkit tidak dapat diinisialisasi."); return 2
+        tools = toolkit.get_tools()
         items = json.loads(os.getenv("TRUSTGUARD_ORDER_ITEMS",
             '[{"name":"TrustGuard Sandbox Demo Item","quantity":1,"item_cost":"1.00"}]'))
         if not isinstance(items, list) or not items: raise ValueError("daftar item kosong/tidak valid")
