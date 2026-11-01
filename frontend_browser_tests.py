@@ -288,6 +288,25 @@ class DashboardBrowserTests(unittest.TestCase):
                 self.assertNotIn("PASSED", text)
                 self.assert_no_runtime_errors()
 
+    def test_stale_and_future_data_fail_closed_on_both_dashboards(self):
+        stale = json.loads(json.dumps(VALID_DATA))
+        stale["timestamp"] = "2000-01-01T00:00:00Z"
+        stale["transaksi_terakhir"]["order_id"] = "STALE-ORDER-DO-NOT-RENDER"
+        future = json.loads(json.dumps(VALID_DATA))
+        future["timestamp"] = "2099-01-01T00:00:00Z"
+        for filename, data in (("dashboard.html", stale), ("dashboard_v2.html", stale),
+                               ("dashboard_v2.html", future)):
+            with self.subTest(filename=filename, timestamp=data["timestamp"]):
+                self.page.route("**/hasil.json", lambda route, payload=json.dumps(data): route.fulfill(
+                    status=200, content_type="application/json", body=payload
+                ))
+                self.page.goto(f"{self.base_url}/{filename}", wait_until="networkidle")
+                text = self.page.locator("body").inner_text()
+                self.assertIn("UNKNOWN", text)
+                self.assertNotIn("STALE-ORDER-DO-NOT-RENDER", text)
+                self.assertNotIn("PASSED", text)
+                self.assert_no_runtime_errors()
+
 
 if __name__ == "__main__":
     unittest.main()
