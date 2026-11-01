@@ -2,7 +2,7 @@
 
 ### Secure Transactions for AI Agents — Trust, Verification, and Controlled Authorization
 
-**PayPal AI Trust Engine** is a security-focused prototype for evaluating delegated authorization and proof-of-possession signals before an optional PayPal Orders request. The current code uses an injected provider adapter; automated tests use mocks and do not call PayPal. Official KYAPay trust material and provider interoperability remain unverified.
+**PayPal AI Trust Engine** is a security-focused prototype for evaluating delegated authorization and proof-of-possession signals before an optional PayPal Orders request. The current code uses an injected provider adapter with an explicit idempotent order-creation method; it must map the supplied request key to PayPal's `PayPal-Request-Id` header. The repository does not contain a verified live adapter, and automated tests use mocks only. Official KYAPay trust material and provider interoperability remain unverified.
 
 The project's core principle is simple: **an AI agent should not be trusted to initiate a financial transaction merely because it can access a payment API.** Its authorization and transaction request should be evaluated before the request proceeds.
 
@@ -326,7 +326,7 @@ The reservation ledger in `spend_reservations.py` uses SQLite `BEGIN IMMEDIATE` 
 - `EXPIRED`: only a reservation that never began provider dispatch may expire and release its hold.
 - `RECONCILIATION_REQUIRED`: provider dispatch began but the outcome is ambiguous; the amount remains consumed.
 
-Provider I/O occurs outside the database transaction. The dispatcher records dispatch-started before calling the adapter, persists a returned order ID as reconciliation evidence, and leaves the reservation held because order creation is not payment settlement. Ambiguous responses are not retried automatically.
+Provider I/O occurs outside the database transaction. The dispatcher records dispatch-started before calling the adapter, persists a returned order ID as reconciliation evidence, and leaves the reservation held because order creation is not payment settlement. Ambiguous responses are not retried automatically. The dispatcher rejects adapters that do not implement `create_order_with_idempotency(params=..., request_id=...)`; this is a local interface contract, not proof that an external adapter correctly sends the PayPal header.
 
 **Deployment limit:** SQLite is supported only for processes on one host sharing the same persistent local database and correct filesystem locking. It is not a multi-host/distributed spend ledger. The constructor requires an explicit `deployment_mode="single-host"` (or `TRUSTGUARD_DEPLOYMENT_MODE=single-host`); missing or multi-host mode is rejected. Do not run this configuration across multiple hosts. A shared atomic store and deployment-specific integration must be implemented and tested before multi-instance operation.
 
