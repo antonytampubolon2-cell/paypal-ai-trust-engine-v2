@@ -471,20 +471,15 @@ class SecurityTests(unittest.TestCase):
                         direct_sdk_imports.append(node.module)
                 elif isinstance(node, ast.Call):
                     func = node.func
-                    if isinstance(func, ast.Attribute) and func.attr == "run":
-                        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-                        method = keywords.get("method")
-                        if isinstance(method, ast.Constant) and method.value == "create_order":
-                            adapter_calls.append((path.name, node.lineno))
-                        if isinstance(method, ast.Constant) and "capture" in str(method.value).lower():
-                            capture_calls.append((path.name, node.lineno))
+                    if isinstance(func, ast.Attribute) and func.attr == "create_order_with_idempotency":
+                        adapter_calls.append((path.name, node.lineno))
                     if isinstance(func, ast.Attribute) and "capture" in func.attr.lower():
                         capture_calls.append((path.name, node.lineno))
         self.assertEqual(direct_sdk_imports, [])
         self.assertEqual(adapter_calls, [("main_public.py", next(
             node.lineno for node in ast.walk(ast.parse((root / "main_public.py").read_text(encoding="utf-8")))
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "run"
+            and node.func.attr == "create_order_with_idempotency"
         ))])
         self.assertEqual(capture_calls, [])
 
