@@ -163,6 +163,11 @@ def process_payment_request(
         )
         if reservation.status != "RESERVED":
             return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Existing reservation is not dispatchable.")
+        if reservation.dispatch_started:
+            # A prior invocation may have reached the provider before crashing or
+            # timing out. Do not retry, even with the same idempotency key, until
+            # an authorized reconciliation process establishes the outcome.
+            return result("PASSED", "PASSED", "PASSED", "UNKNOWN", "A prior dispatch attempt is recorded; no automatic retry was performed. Reconciliation is required.")
         spend_reservation_store.mark_dispatch_started(reservation.reservation_id)
     except Exception as exc:
         # The store is part of the security boundary; any storage or policy error
