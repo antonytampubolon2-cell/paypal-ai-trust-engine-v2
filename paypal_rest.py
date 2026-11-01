@@ -56,6 +56,8 @@ def normalize_rest_items(
             or isinstance(quantity, str) and re.fullmatch(r"[1-9][0-9]*", quantity)
         ):
             raise RestItemValidationError(f"rest_items[{index}].quantity must be a positive integer.")
+        if isinstance(quantity, int) and quantity.bit_length() > 426:
+            raise RestItemValidationError(f"rest_items[{index}].quantity is too large to validate safely.")
         quantity_text = str(quantity)
         if len(quantity_text) > 128:
             raise RestItemValidationError(f"rest_items[{index}].quantity is too large to validate safely.")
@@ -67,6 +69,8 @@ def normalize_rest_items(
         raw_value = unit.get("value")
         if not isinstance(raw_value, (str, int)) or isinstance(raw_value, bool):
             raise RestItemValidationError(f"rest_items[{index}].unit_amount.value must be a decimal string or integer.")
+        if isinstance(raw_value, int) and raw_value.bit_length() > 426:
+            raise RestItemValidationError(f"rest_items[{index}].unit_amount.value is too large to validate safely.")
         raw_text = str(raw_value)
         if len(raw_text) > 128 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw_text):
             raise RestItemValidationError(f"rest_items[{index}].unit_amount.value is malformed.")
