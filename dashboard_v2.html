@@ -90,6 +90,7 @@
     if (typeof trx.delivery_status !== "string" || !DELIVERY_STATUSES.has(trx.delivery_status)) return false;
     if (!Array.isArray(data.audit_trail)) return false;
     if (data.timestamp !== null) {
+      if (typeof data.timestamp !== "string") return false;
       const timestampMs = Date.parse(data.timestamp);
       const now = Date.now();
       if (!Number.isFinite(timestampMs) || timestampMs > now + MAX_FUTURE_SKEW_MS ||
@@ -175,7 +176,7 @@
         const time = document.createElement("span");
         time.textContent = "[" + item.waktu + "] ";
         const event = document.createElement("span");
-        event.textContent = item.event + " → ";
+        event.textContent = "UNVERIFIED CLAIM · " + item.event + " → ";
         const result = document.createElement("strong");
         result.textContent = "UNVERIFIED CLAIM · " + item.hasil;
         row.append(time, event, result);
