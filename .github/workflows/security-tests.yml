@@ -1,0 +1,50 @@
+name: Security and Pages artifact tests
+on:
+  pull_request:
+    branches: [main, codex/security-hardening]
+  push:
+    branches: [codex/security-hardening, codex/frontend-hardening, codex/pages-release-repair]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Compile Python modules
+        run: python -m compileall -q .
+      - name: Install security and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-security.txt
+          python -m pip install playwright pyyaml
+      - name: Install Chromium for browser regression tests
+        run: python -m playwright install --with-deps chromium
+      - name: Build Pages artifact from this commit
+        run: python build_pages.py
+      - name: Test Pages artifact contract
+        run: python -m unittest -v pages_artifact_tests
+      - name: Validate workflow YAML and release gates
+        run: python -m unittest -v workflow_validation_tests
+      - name: Backend security tests
+        run: python -m unittest -v security_tests
+      - name: Frontend regression tests
+        run: python -m unittest -v frontend_tests
+      - name: Browser regression tests
+        run: python -m unittest -v frontend_browser_tests
+      - name: Probe currently published Pages (informational only)
+        env:
+          TRUSTGUARD_PAGES_BASE_URL: https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2
+          TRUSTGUARD_EXPECTED_COMMIT_SHA: ${{ github.sha }}
+        run: python deployment_probe.py
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustguard-browser-evidence
+          path: browser-artifacts/
+          if-no-files-found: warn
+          retention-days: 14

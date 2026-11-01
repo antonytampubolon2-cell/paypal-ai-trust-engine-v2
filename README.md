@@ -77,7 +77,7 @@ The project explores how these risks can be addressed through layered checks bef
 
 PayPal AI Trust Engine introduces **TrustGuard Agent**, a security-oriented workflow that evaluates a request before deciding whether it should proceed to PayPal's order-creation interface.
 
-The prototype brings together authorization-claim validation, an in-memory anti-replay cache, selected DPoP binding checks, and PayPal Sandbox integration.
+The original prototype used synthetic authorization payloads and process-local caches. The `codex/security-hardening` branch replaces that executable demonstration with a fail-closed JWT/DPoP verification boundary and atomic SQLite replay claims. Official KYAPay issuer and delegation contracts remain blockers.
 
 Its intended workflow is:
 
@@ -89,7 +89,7 @@ Its intended workflow is:
 6. If the checks pass, attempt to create a PayPal Sandbox order.
 7. Display relevant project and transaction information through the monitoring dashboard.
 
-The repository currently uses synthetic authorization payloads and mock DPoP data in its verification demonstrations. These tests demonstrate the intended control flow; they should not be interpreted as proof of a complete production-grade identity or DPoP implementation.
+The new regression tests use explicitly synthetic, ephemeral signing keys and a mocked PayPal adapter. They verify code paths only; they do not establish a real KYAPay trust relationship or prove production readiness.
 
 ---
 
@@ -99,7 +99,7 @@ TrustGuard Agent organizes the prototype into the following security layers.
 
 ### 1. KYAPay Token Verifier
 
-The KYAPay verification module checks for required authorization claims, including:
+The new JWT adapter requires a compact signed token and verifies its signature plus configured issuer, audience, expiration, and required claims. It fails closed unless official issuer configuration is supplied. The repository does not contain the authoritative KYAPay token contract.
 
 - Issuer (`iss`)
 - Subject (`sub`)
@@ -108,40 +108,40 @@ The KYAPay verification module checks for required authorization claims, includi
 - Token identifier (`jti`)
 - Delegation grant (`delegation_grant`)
 
-It also checks token expiration and selected delegation constraints, including the grant's validity period and spending limit.
+The delegation policy adapter checks the allowlisted merchant, amount, currency, grant validity, and token expiry. Its expected field names must be confirmed against the actual issuer schema before deployment.
 
 These checks are intended to help establish whether the submitted authorization data contains the required information and remains within the configured constraints.
 
-**Implementation note:** The current demonstration performs structural and selected claim checks against synthetic payloads. It does not establish an external identity or independently validate every issuer and audience claim against a trusted policy.
+**Blocker:** Signature verification is configurable, but no authoritative KYAPay issuer, signing algorithm, public key/JWKS policy, or delegation schema is supplied by this repository. Do not configure invented values.
 
 ### 2. JTI Anti-Replay Cache
 
 The JTI Anti-Replay Cache records accepted token identifiers and rejects an identifier that has already been used while it remains in the cache.
 
-The implementation uses an in-memory Python data structure and removes expired entries.
+The new `SQLiteReplayStore` uses an atomic transaction and unique key to reject duplicate identifiers. It is suitable only for a persistent single-host deployment; multi-host production requires a shared atomic replay store.
 
 This demonstrates the basic anti-replay control:
 
 **Accept a valid token identifier once; reject a repeated identifier.**
 
-The current cache is process-local and is not a persistent or distributed production cache.
+SQLite is persistent and atomic on a single host, but is not a distributed replay store. A shared replay service remains a deployment blocker for multi-host operation.
 
 ### 3. DPoP Verifier — RFC 9449
 
 The prototype includes a DPoP-oriented verifier referencing [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html).
 
-The current implementation checks selected proof fields, including:
+The new DPoP verifier validates a signed compact JWT, public JWK, signature, `typ`, `htm`, canonical HTTPS `htu`, `iat`, `jti`, `ath`, token key binding, and replay protection. Full interoperability and deployment-specific protocol review remain required.
 
 - `htm` — expected HTTP method
 - `htu` — expected HTTP URI
 - `jti` — unique proof identifier
 - `jwk` — public-key information
 
-It also computes a JWK thumbprint and compares it with the token's `cnf.jkt` value. A separate in-memory cache is used to reject a repeated DPoP proof identifier.
+It computes the RFC 7638 thumbprint and compares it with `cnf.jkt`, verifies the `ath` hash against the presented access token, and uses the atomic replay store for proof identifiers.
 
 These checks demonstrate selected binding and replay-detection concepts.
 
-**Important limitation:** The published prototype does not perform full cryptographic signature verification of a DPoP proof. Complete RFC 9449 enforcement requires additional validation, including proof-signature verification and the applicable protocol checks.
+**Important limitation:** The implementation adds cryptographic proof verification but has not passed a full RFC 9449 interoperability suite. The actual issuer/client protocol and any required nonce policy must be confirmed before deployment.
 
 ### 4. Fraud Risk Engine (FRP)
 
@@ -151,11 +151,11 @@ The dashboard is a monitoring interface, not a standalone guarantee that a trans
 
 ### 5. PayPal Agent Toolkit Integration
 
-The project initializes PayPal Agent Toolkit with Sandbox context and enables selected order-related actions.
+The hardened entry point does not initialize the PayPal toolkit on import and does not enable capture actions. Order creation is possible only through an explicitly injected adapter after authentication and policy checks.
 
-In the end-to-end demonstration, a payment request that passes the TrustGuard checks proceeds to a PayPal Sandbox order-creation attempt.
+No live or Sandbox API call is performed by the test suite. A mocked adapter verifies that the outbound order payload uses the same checked merchant, amount, and currency. The real merchant-ID mapping remains unconfirmed.
 
-Requests rejected by the TrustGuard verification workflow are blocked before that order-creation call.
+Requests rejected by authentication or policy checks are blocked before the adapter is called. An order-created result is not treated as proof that a payment was completed or captured.
 
 This integration is intended for controlled testing in the PayPal Sandbox, not for processing real payments.
 
@@ -246,122 +246,30 @@ Use a compatible Python environment and resolve any dependency errors before pro
 
 ---
 
-## Judges' Testing Instructions
+## Security Hardening Branch — Safe Verification
 
-This section is intended to help judges run the public Python demonstration using PayPal Sandbox credentials.
+The hardened entry point no longer creates a PayPal order when imported or run directly. It does not capture payments. The KYAPay issuer contract and merchant/delegation schema are not available in this repository, so the backend fails closed until official issuer documentation and trust material are supplied.
 
-**Sandbox credentials must be provided through a private, secure channel or supplied by the judge. Do not publish a Client Secret in this README, a GitHub issue, a commit, or a public project submission.**
+### Run local security tests
 
-### Step 1 — Obtain Sandbox Credentials
-
-Obtain the Sandbox application's:
-
-- **Client ID**
-- **Client Secret**
-
-Use credentials associated with a PayPal Developer Sandbox application, not live-production credentials.
-
-Official resource: [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/).
-
-### Step 2 — Prepare the Public Script for Environment Variables
-
-The currently published `main_public.py` contains placeholder assignments that overwrite environment variables.
-
-Open `main_public.py` in a text editor and locate these lines:
-
-```python
-os.environ["PAYPAL_CLIENT_ID"] = "MASUKKAN_CLIENT_ID_ANDA_DI_SINI"
-os.environ["PAYPAL_CLIENT_SECRET"] = "MASUKKAN_SECRET_ANDA_DI_SINI"
-```
-
-**Delete those two assignment lines from the local copy of the script.** Do not replace them with actual credentials.
-
-The script already reads `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` when it initializes the PayPal Toolkit. Removing the hard-coded placeholder assignments allows those values to be supplied by the environment.
-
-This is a local testing preparation step; it does not change the published GitHub source unless you separately commit a code change.
-
-### Step 3 — Configure Credentials
-
-#### Windows PowerShell
-
-In the same PowerShell session, from the repository directory, run:
-
-```powershell
-$env:PAYPAL_CLIENT_ID = "YOUR_SANDBOX_CLIENT_ID"
-$env:PAYPAL_CLIENT_SECRET = "YOUR_SANDBOX_CLIENT_SECRET"
-```
-
-Replace the example values locally with the actual Sandbox credentials supplied for the test.
-
-#### macOS or Linux
-
-In the same terminal session, run:
+Install the dedicated verifier dependencies and run the automated tests:
 
 ```bash
-export PAYPAL_CLIENT_ID="YOUR_SANDBOX_CLIENT_ID"
-export PAYPAL_CLIENT_SECRET="YOUR_SANDBOX_CLIENT_SECRET"
+python -m pip install -r requirements-security.txt
+python -m unittest -v security_tests
 ```
 
-Replace the example values locally with the actual Sandbox credentials supplied for the test.
+The tests use ephemeral synthetic cryptographic fixtures and a mocked PayPal adapter. They do not prove that a real KYAPay issuer is trusted, and they must never be used as production credentials.
 
-Avoid sharing terminal screenshots or logs that expose the Secret.
+### Required official KYAPay configuration
 
-### Step 4 — Run the Verification and Sandbox Demonstration
+The JWT adapter requires `KYAPAY_ISSUER`, `KYAPAY_AUDIENCE`, `KYAPAY_PUBLIC_KEY_PEM`, and `KYAPAY_JWT_ALGORITHM`. Do not invent these values. Obtain the authoritative token format, signing algorithm, issuer, audience, key-discovery/rotation rules, and delegation schema from the real KYAPay issuer before configuring them.
 
-With the virtual environment activated and the environment variables set, execute:
+### PayPal integration status
 
-```bash
-python main_public.py
-```
+No PayPal API call is made by the test suite or by importing `main_public.py`. The payment dispatcher accepts an injected adapter so integration tests can use a mock. Before connecting a real adapter, confirm the merchant identifier mapping and Orders API payload with official PayPal documentation. An order-creation result is reported as `ORDER_CREATED`, not as a completed or captured payment.
 
-The script runs the security demonstrations and then attempts a PayPal Sandbox order-creation request if the verification workflow permits it.
-
-**Important:** The current demonstration is configured to attempt a Sandbox order for **USD 50.00**. Running it can create a test order in the configured Sandbox account. It does not represent a live payment.
-
-### Step 5 — Review the Console Output
-
-Inspect the console output for:
-
-- PayPal Agent Toolkit initialization and available tools
-- KYAPay token validation results
-- Replayed-token rejection
-- Expired-token rejection
-- DPoP field, binding, and replay-check results
-- TrustGuard allow-or-block decisions
-- The PayPal Sandbox order-creation response
-- The final status reported by the demonstration
-
-The exact response and any generated order identifiers depend on successful authentication, the Sandbox environment, and the PayPal API response.
-
-### Step 6 — Review the Live Dashboard
-
-Open:
-
-[PayPal AI Trust Engine — Live Dashboard](https://antonytampubolon2-cell.github.io/paypal-ai-trust-engine-v2/dashboard_v2.html)
-
-Use the dashboard to review its security-module status panels and the transaction-related information available from its published data source.
-
-The dashboard is a separate, browser-based monitoring surface. Running `main_public.py` locally does not by itself guarantee that local console results will automatically appear in the deployed dashboard.
-
-### Testing Notes
-
-- Use Sandbox credentials only.
-- Do not commit secrets to GitHub.
-- Use the provided order IDs as review references rather than assuming they will be retrievable by every Sandbox application.
-- If authentication fails, verify that the credentials belong to the Sandbox application and that both environment variables are available in the same shell session.
-- If a Python dependency fails to install, verify the Python environment and the package's current installation requirements.
-
----
-
-## Expected Test Results
-
-A successful demonstration should show the verification workflow evaluating its synthetic test cases, including valid authorization data, a repeated token identifier, and expired authorization data.
-
-The DPoP test cases are designed to demonstrate acceptance of a matching proof, rejection of a repeated proof identifier, and rejection of an HTTP URI mismatch.
-
-For the end-to-end path, a request that passes the configured TrustGuard checks should proceed to the PayPal Sandbox order-creation attempt. The script reports the resulting API response or an error.
-
-An authorization-check success is **not equivalent to a guarantee that PayPal will successfully create an order**. The external request can still fail due to invalid credentials, API errors, dependency problems, or other environment-related issues.
+See [SECURITY_STATUS.md](SECURITY_STATUS.md) for critical blockers and deployment limitations. Do not merge this branch or represent the project as production-ready while those blockers remain unresolved.
 
 ---
 
@@ -373,12 +281,14 @@ The current implementation demonstrates several useful concepts, but it should n
 
 Known limitations include:
 
-- KYAPay verification is performed against synthetic payloads and selected claims; it is not a complete external identity-verification service.
-- Token and DPoP replay caches are in-memory and process-local.
-- The DPoP demonstration checks selected fields and JWK binding but does not verify the full DPoP proof signature.
+- The KYAPay issuer/token/delegation contract is not provided; synthetic tests do not establish official issuer interoperability.
+- SQLite replay claims are atomic and persistent only when the same database file is retained. They are not distributed multi-instance protection; production must provide a shared atomic store where needed.
+- DPoP signature and core binding checks are implemented, but full RFC 9449 interoperability, canonicalization, and issuer-specific nonce requirements remain unverified.
 - The FRP dashboard panel is not evidence of a complete backend fraud-scoring system.
-- The end-to-end workflow uses test authorization data and PayPal Sandbox.
-- Production deployment would require comprehensive validation, persistent replay protection, secure key management, robust audit logging, monitoring, rate limiting, and additional testing.
+- Tests use synthetic keys and a mocked PayPal adapter; no production integration is established.
+- Per-transaction spending limits are checked, but cumulative delegation spend is not protected by an atomic ledger/reservation.
+- Order creation has no verified idempotency guarantee. An ambiguous provider response followed by retry may risk duplicate orders.
+- Production deployment would require authoritative issuer contracts, validated merchant mapping, shared replay protection, cumulative-spend reservations, idempotency design, secure key management, audit logging, monitoring, rate limiting, and additional testing.
 
 These limitations define the current prototype scope and provide a foundation for further development.
 
@@ -411,3 +321,22 @@ This project is released under the **MIT License**. See the [`LICENSE`](LICENSE)
 - [RFC 7638 — JSON Web Key (JWK) Thumbprint](https://www.rfc-editor.org/rfc/rfc7638.html)
 
 **PayPal AI Trust Engine — Building a safer foundation for AI-driven commerce.**
+
+## Explicit transaction status contract (security review)
+
+The backend result reports these independent fields: `authentication_status`, `dpop_status`, `authorization_status`, `order_status`, and `capture_status`. The legacy `policy_status` and `delivery_status` fields remain available for compatibility.
+
+- Capture starts and remains `NOT_ATTEMPTED`; this dispatcher does not capture payments.
+- `ORDER_CREATED` means only that the order adapter returned a non-empty order identifier. It does not mean capture, settlement, fulfillment, or payment completion.
+- Authentication, DPoP, authorization, transaction validation, or replay-store failures must stop processing before the PayPal order adapter is called.
+- The current spending check is per transaction, not a cumulative grant budget. Order-creation idempotency is not implemented; retries after ambiguous provider responses are a blocker.
+- The configured KYAPay issuer, delegation schema, nonce policy, and internal-to-PayPal merchant mapping must come from authoritative sources. Do not invent them or treat synthetic test fixtures as production proof.
+
+See [SECURITY_STATUS.md](SECURITY_STATUS.md) for the current blockers. A passing mock-based test suite is evidence about local code behavior only, not a production integration certification.
+
+
+## Repository compatibility audit
+
+Stage 4 inventory and call-site findings are recorded in [`COMPATIBILITY_AUDIT.md`](COMPATIBILITY_AUDIT.md). The current backend contract is keyword-only `process_payment_request(...)`; callers must provide the token, DPoP proof, transaction, replay store, and expected URL explicitly. The old `execute_safe_payment()` symbol is not present in this repository, and no in-repository dependency on it was found. No insecure legacy adapter is provided.
+
+The dashboard reads static `hasil.json` and is not connected to authenticated backend telemetry. Its `UNVERIFIED` source and `UNKNOWN` transaction statuses are not evidence of an authenticated or completed payment. The only runtime order-dispatch call is the injected adapter call after the security gates; this prototype does not capture payments.
