@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 import math
+import re
 import time
 
 from trustguard_security import (
@@ -126,7 +127,7 @@ def process_payment_request(
             "PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED",
             "PayPal adapter lacks the explicit provider-idempotency contract; dispatch failed closed.",
         )
-    if not isinstance(reservation_idempotency_key, str) or not reservation_idempotency_key or len(reservation_idempotency_key) > 108:
+    if not isinstance(reservation_idempotency_key, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,108}", reservation_idempotency_key):
         return result("PASSED", "PASSED", "PASSED", "NOT_ATTEMPTED", "Provider idempotency key is invalid.")
 
     # The issuer's grant identifier is not inferred from an unconfirmed claim name.
