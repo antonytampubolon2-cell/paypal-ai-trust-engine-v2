@@ -88,6 +88,19 @@ class SpendReservationTests(unittest.TestCase):
             self.store.reserve(grant_id="issuer-grant-1", max_spend="200.00", amount="1.00",
                                currency="USD", idempotency_key="second", expires_at=9999999999)
 
+    def test_order_id_is_persisted_as_reconciliation_evidence_not_settlement(self):
+        r = self.reserve("order-created", "15.00")
+        self.store.mark_dispatch_started(r.reservation_id)
+        self.store.record_order_created(r.reservation_id, order_id="ORDER-LOCAL-TEST")
+        self.store.record_order_created(r.reservation_id, order_id="ORDER-LOCAL-TEST")
+        events = self.store.events_for(r.reservation_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "ORDER_CREATED")
+        self.assertEqual(events[0]["external_reference"], "ORDER-LOCAL-TEST")
+        self.assertEqual(self.store.get(r.reservation_id).status, "RESERVED")
+        with self.assertRaises(ReservationError):
+            self.store.record_order_created(r.reservation_id, order_id="DIFFERENT-ORDER")
+
     def test_storage_must_be_persistent(self):
         with self.assertRaises(ReservationError):
             SQLiteSpendReservationStore(":memory:")
