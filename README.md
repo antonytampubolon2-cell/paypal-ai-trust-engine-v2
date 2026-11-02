@@ -3,10 +3,11 @@
 TrustGuard is a security-focused hackathon prototype exploring authorization boundaries for AI-assisted commerce. Its core principle: **model output is advice, not authorization**.
 
 ## Fast, safe offline demo
-The candidate includes a local-only synthetic dashboard. Set the commit identity before building and running artifact tests:
+The candidate includes a local-only synthetic dashboard. It makes no PayPal/OpenAI calls, creates/captures no orders, moves no money, and does not verify KYAPay issuer identity, merchant identity, DPoP signatures, or live fraud scores. The dashboard is not live telemetry.
 
-    export GITHUB_SHA="$(git rev-parse HEAD)" It makes no PayPal/OpenAI calls, creates/captures no orders, moves no money, and does not verify KYAPay issuer identity, merchant identity, DPoP signatures, or live fraud scores. The dashboard is not live telemetry.
+From the repository root, set the commit identity used by artifact tests:
 
+    export GITHUB_SHA="$(git rev-parse HEAD)"
     python -m compileall -q .
     python build_pages.py
     python -m unittest -v demo_validation_tests demo_artifact_tests
