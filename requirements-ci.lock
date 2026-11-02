@@ -1,0 +1,12 @@
+# Complete Python 3.12 CI lock, including runtime and test dependencies.
+# Versions are exact; refresh only with the documented dependency review workflow.
+-r requirements-runtime.lock
+greenlet==3.5.6
+iniconfig==2.3.1
+packaging==26.3
+playwright==1.64.1
+pluggy==1.7.0
+pygments==2.21.0
+pytest==8.4.2
+pyee==14.0.0
+PyYAML==6.0.3
