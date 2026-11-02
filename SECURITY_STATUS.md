@@ -62,3 +62,42 @@ SQLite `BEGIN IMMEDIATE` serializes reservation writers for processes sharing on
 The dispatcher now requires the local `create_order_with_idempotency(params=..., request_id=...)` adapter contract and rejects generic adapters before provider I/O. No verified real adapter currently proves that `request_id` is sent as PayPal's `PayPal-Request-Id` header or that provider lookup/reconciliation is implemented. No automatic retry is performed after ambiguous outcomes. Obtain official integration details and implement a provider adapter with explicit idempotency and lookup/reconciliation behavior before enabling real external transactions.
 
 No KYAPay issuer metadata, keys, grant identifiers, or PayPal merchant mappings have been invented. No real PayPal order, authorization, capture, refund, transfer, or deployment was executed.
+
+
+## Stage 1 — FastAPI AI assistance boundary
+
+### Implemented in the Stage 1 feature branch
+
+- `app.py`: FastAPI ASGI application with `/healthz`, `/readyz`, and authenticated `/v1/ai/respond`.
+- `ai_service.py`: isolated OpenAI SDK adapter; reads `OPENAI_API_KEY` from the process environment; explicit 20-second timeout; retries disabled; controlled configuration, timeout, and provider errors; output redaction.
+- `requirements.txt`: runtime and test dependencies layered on `requirements-security.txt`.
+- `test_api.py`: mocked tests for health/readiness, authentication, invalid/oversized input, missing credentials, output filtering, provider timeout/errors, generic exception safety, process-local rate limiting, and separation from the PayPal dispatcher.
+
+### Configuration names (values must remain secret)
+
+- `OPENAI_API_KEY` — required at runtime for AI calls.
+- `OPENAI_MODEL` — optional model override.
+- `TRUSTGUARD_API_BEARER_TOKEN` — required bearer token; minimum 32 characters.
+- `TRUSTGUARD_CORS_ORIGINS` — optional comma-separated exact origin allowlist; defaults to no allowed origins.
+
+### Commands
+
+Local install: `python -m pip install -r requirements.txt`
+
+API tests: `python -m pytest -q test_api.py`
+
+Existing backend tests: `python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests`
+
+Full regression command (after installing `pyyaml` and `playwright` and Chromium): `python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests`
+
+Render build command: `pip install -r requirements.txt`
+
+Render start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+
+### Limits and verification state
+
+- The rate limiter is process-local memory only: 20 requests per client host per 60 seconds. It is not distributed and is not suitable for multi-instance enforcement.
+- `/readyz` checks SDK availability and presence of required configuration only; it does not make a provider request or verify OpenAI credentials.
+- The AI route is separate from the payment dispatcher and has no PayPal order/capture behavior.
+- Automated tests must mock the AI adapter and must not use real OpenAI or PayPal credentials.
+- The changes are a backend foundation, not a production-ready service. No deployment or provider connectivity is claimed. Existing KYAPay/PayPal integration blockers and single-host SQLite limits remain in force.
