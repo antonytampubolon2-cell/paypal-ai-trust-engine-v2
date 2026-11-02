@@ -27,7 +27,7 @@ jobs:
       - name: Build static site with commit identity
         run: python build_pages.py
       - name: Run full Pages artifact contract tests before upload
-        run: python -m unittest -v pages_artifact_tests
+        run: python -m unittest -v pages_artifact_tests demo_artifact_tests
       - name: Validate build identity and content
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -38,14 +38,14 @@ jobs:
           expected = os.environ["EXPECTED_SHA"]
           manifest = json.loads((root / "build-info.json").read_text())
           assert manifest["frontend_commit"] == expected, "build manifest SHA mismatch"
-          for name in ("dashboard.html", "dashboard_v2.html"):
+          for name in ("dashboard.html", "dashboard_v2.html", "dashboard_demo.html"):
               text = (root / name).read_text()
               match = re.search(r'<meta name="trustguard-build-commit" content="([0-9a-f]{40})">', text)
               visible = re.search(r'<code id="build-commit">([0-9a-f]{40})</code>', text)
               assert match and match.group(1) == expected, f"{name}: SHA metadata mismatch"
               assert visible and visible.group(1) == expected, f"{name}: visible SHA mismatch"
               assert "__TRUSTGUARD_BUILD_COMMIT__" not in text, f"{name}: unresolved build placeholder"
-          for name in ("dashboard.html", "dashboard_v2.html", "index.html", "build-info.json"):
+          for name in ("dashboard.html", "dashboard_v2.html", "dashboard_demo.html", "index.html", "build-info.json"):
               text = (root / name).read_text()
               assert "__TRUSTGUARD_BUILD_COMMIT__" not in text, f"{name}: unresolved build placeholder"
           manifest = json.loads((root / "build-info.json").read_text())
@@ -58,12 +58,19 @@ jobs:
           assert data["transaksi_terakhir"]["authentication_status"] == "UNKNOWN"
           assert data["transaksi_terakhir"]["policy_status"] == "UNKNOWN"
           assert data["transaksi_terakhir"]["delivery_status"] == "UNKNOWN"
+          demo_data = json.loads((root / "hasil_demo.json").read_text())
+          assert demo_data["demo_mode"] == "SIMULATED"
+          assert demo_data["external_provider_calls"] is False
+          assert demo_data["real_payment_executed"] is False
+          assert demo_data["statistics"]["real_payments"] == 0
+          assert demo_data["verification_capabilities"]["paypal_authorization"] == "NOT_ATTEMPTED"
+          assert demo_data["latest_scenario"]["status"] == "NOT_EXECUTED"
           forbidden = (
               "Bukti Transaksi End-to-End (PayPal Sandbox)",
               "7R3064957MB0759941", "3HD92730V0626752B", "1U9063377E719994A",
           )
           combined = "\n".join((root / name).read_text() for name in
-                                  ("dashboard.html", "dashboard_v2.html", "index.html", "hasil.json"))
+                                  ("dashboard.html", "dashboard_v2.html", "dashboard_demo.html", "index.html", "hasil.json", "hasil_demo.json"))
           for marker in forbidden:
               assert marker not in combined, f"forbidden legacy content: {marker}"
           print("Pre-deploy artifact checks passed for", expected)
@@ -189,6 +196,21 @@ jobs:
               time.sleep(10)
           if data_error:
               errors.append(data_error)
+          demo_data_error = "hasil_demo.json: no response"
+          for attempt in range(8):
+              try:
+                  req = urllib.request.Request(base + "/hasil_demo.json", headers={"Cache-Control": "no-cache", "Accept": "application/json"})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      demo_data = json.loads(response.read().decode("utf-8"))
+                  if demo_data.get("demo_mode") == "SIMULATED" and demo_data.get("external_provider_calls") is False and demo_data.get("real_payment_executed") is False and demo_data.get("statistics", {}).get("real_payments") == 0 and demo_data.get("verification_capabilities", {}).get("paypal_authorization") == "NOT_ATTEMPTED" and demo_data.get("latest_scenario", {}).get("status") == "NOT_EXECUTED":
+                      demo_data_error = ""
+                      break
+                  demo_data_error = "hasil_demo.json: synthetic-only contract failed"
+              except Exception as exc:
+                  demo_data_error = f"hasil_demo.json: {type(exc).__name__}: {exc}"
+              time.sleep(10)
+          if demo_data_error:
+              errors.append(demo_data_error)
           if errors:
               raise SystemExit("DEPLOYMENT_NOT_VERIFIED: " + "; ".join(errors))
           print("DEPLOYMENT_VERIFIED: both dashboards and build manifest match", expected)

@@ -112,5 +112,12 @@ class ReleasePipelineTests(unittest.TestCase):
         workflow = ROOT / ".github" / "workflows" / "system-integration-tests.yml"
         self.assertIn("spend_reservations_tests", workflow.read_text(encoding="utf-8"))
 
+    def test_demo_dashboard_and_fixture_are_in_deploy_verification(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("dashboard_demo.html", workflow)
+        self.assertIn("hasil_demo.json", workflow)
+        self.assertIn('demo_data.get("demo_mode") == "SIMULATED"', workflow)
+        self.assertIn('demo_data.get("real_payment_executed") is False', workflow)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

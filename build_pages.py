@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from demo_snapshot import build_demo_snapshot
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "_site"
@@ -23,7 +24,7 @@ if len(SHA) != 40 or any(ch not in "0123456789abcdef" for ch in SHA):
 if OUT.exists():
     shutil.rmtree(OUT)
 OUT.mkdir(parents=True)
-for name in ("dashboard.html", "dashboard_v2.html", "hasil.json"):
+for name in ("dashboard.html", "dashboard_v2.html", "dashboard_demo.html", "hasil.json"):
     source = ROOT / name
     if not source.is_file():
         raise SystemExit(f"Refusing build: required file missing: {name}")
@@ -33,6 +34,8 @@ for name in ("dashboard.html", "dashboard_v2.html", "hasil.json"):
             raise SystemExit(f"Refusing build: commit marker missing in {name}")
         content = content.replace("__TRUSTGUARD_BUILD_COMMIT__", SHA)
     (OUT / name).write_text(content, encoding="utf-8")
+
+(OUT / "hasil_demo.json").write_text(json.dumps(build_demo_snapshot(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 manifest = {
     "application": "PayPal AI Trust Engine",
@@ -56,7 +59,7 @@ manifest = {
 <p>Security prototype dashboard. Static status is unverified and is not proof of a live transaction or production security.</p>
 <ul>
 <li><a href="dashboard.html">Dashboard</a></li>
-<li><a href="dashboard_v2.html">Dashboard v2</a></li>
+<li><a href="dashboard_v2.html">Dashboard v2</a></li>\n<li><a href="dashboard_demo.html">Offline synthetic demo</a></li>
 </ul>
 <p>Frontend build commit: <code id="build-commit">{sha}</code></p>
 <p>Authentication, policy, and delivery status: UNKNOWN until verified backend telemetry is connected.</p>
