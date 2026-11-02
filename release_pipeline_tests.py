@@ -89,7 +89,21 @@ class ReleasePipelineTests(unittest.TestCase):
     def test_all_workflow_actions_are_immutable_and_known_pins_match_upstream_tags(self):
         workflow_dir = ROOT / ".github" / "workflows"
         workflows = sorted(workflow_dir.glob("*.yml"))
-        self.assertEqual(len(workflows), 6, "The six reviewed workflows must remain present")
+        expected_workflows = {
+            "backend-rest-tests.yml",
+            "dashboard-tests.yml",
+            "deploy-pages.yml",
+            "release-pipeline-tests.yml",
+            "security-tests.yml",
+            "stage1-backend-tests.yml",
+            "system-integration-tests.yml",
+        }
+        actual_workflows = {workflow.name for workflow in workflows}
+        self.assertEqual(
+            actual_workflows,
+            expected_workflows,
+            "Workflow inventory must match the explicitly reviewed set; review any addition or removal",
+        )
         expected_pins = {
             "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
             "actions/setup-python": "6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
