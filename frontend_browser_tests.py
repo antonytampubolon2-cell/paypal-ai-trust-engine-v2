@@ -4,6 +4,7 @@ These tests exercise the browser DOM, responsive layout, console/network signals
 and hostile JSON values. They do not certify production deployment or backend trust.
 """
 import json
+from datetime import datetime, timezone
 import pathlib
 import threading
 import unittest
@@ -248,10 +249,11 @@ class DashboardBrowserTests(unittest.TestCase):
     def test_xss_payloads_render_as_text_and_do_not_create_elements_or_execute(self):
         data = json.loads(json.dumps(VALID_DATA))
         payload = '<img src=x onerror="window.__xss=1"><script>window.__xss=2</script>'
-        data["timestamp"] = "2026-11-01T00:00:00Z"
+        fresh_timestamp = datetime.now(timezone.utc).isoformat()
+        data["timestamp"] = fresh_timestamp
         data["transaksi_terakhir"]["order_id"] = payload
         data["transaksi_terakhir"]["merchant"] = payload
-        data["audit_trail"] = [{"waktu": "2026-11-01T00:00:00Z", "event": "<script>window.__xss=2</script>", "hasil": "UNKNOWN"}]
+        data["audit_trail"] = [{"waktu": fresh_timestamp, "event": "<script>window.__xss=2</script>", "hasil": "UNKNOWN"}]
         self.open_v2(json.dumps(data))
         self.assertEqual(self.page.evaluate("window.__xss"), 0)
         self.assertEqual(self.page.locator("#transaksi-area img, #transaksi-area script").count(), 0)

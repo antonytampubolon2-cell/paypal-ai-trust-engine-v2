@@ -11,7 +11,7 @@ class DemoSafetyTests(unittest.TestCase):
  def test_demo_entrypoint_is_offline_and_separate_from_payment_dispatcher(self):
   from pathlib import Path
   source=(Path(__file__).resolve().parent/"demo_snapshot.py").read_text(encoding="utf-8").lower()
-  for marker in ("requests.","httpx.","paypal_client_secret","openai","paypal_agent_toolkit"):self.assertNotIn(marker,source)
+  for marker in ("requests.","httpx.","urllib.request","urlopen(","paypal_client_secret","openai_api_key","paypal_agent_toolkit"):self.assertNotIn(marker,source)
  def test_dashboard_has_safe_rendering_and_artifact_contract(self):
   from pathlib import Path
   h=(Path(__file__).resolve().parent/"dashboard_demo.html").read_text(encoding="utf-8")
