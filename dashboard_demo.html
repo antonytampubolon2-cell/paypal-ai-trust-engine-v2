@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><meta name="trustguard-build-commit" content="__TRUSTGUARD_BUILD_COMMIT__"><title>TrustGuard — Offline Synthetic Demo</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0b1220;color:#e5edf8}*{box-sizing:border-box}body{margin:0;padding:24px;background:#101c30;min-height:100vh}main{max-width:1100px;margin:auto}h1{color:#8fc5ff}.muted{color:#a7b6cb}.banner,.card{padding:18px;border-radius:12px;margin:14px 0;background:#182840;border:1px solid #354b68}.banner{background:#3b2f13;border-color:#d6a83c;line-height:1.55}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.stat{font-size:1.8rem;color:#9fe6ca;font-weight:700}dl{display:grid;grid-template-columns:minmax(140px,1fr) 2fr;gap:8px}dt{color:#a7b6cb}dd{margin:0;overflow-wrap:anywhere}ul{padding:0;list-style:none}li{border-top:1px solid #354b68;padding:12px 0}footer{color:#a7b6cb;margin-top:24px}.build{overflow-wrap:anywhere}@media(max-width:520px){body{padding:12px}dl{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>TrustGuard Agent</h1><p class="muted">Authorization-boundary prototype · offline reproducible demonstration</p>
+<div class="banner" role="status"><strong>SIMULATED DATA — NO PAYMENT WAS EXECUTED.</strong><p>This static snapshot is not live telemetry. KYAPay issuer identity, merchant identity, DPoP signatures, PayPal authorization, and OpenAI connectivity are not verified. Unknown verification fails closed.</p><p id="snapshot-meta">Loading and validating the local snapshot…</p></div>
+<section class="grid"><div class="card"><h2>Scenarios</h2><div class="stat" id="scenarios">—</div><p class="muted">Synthetic only</p></div><div class="card"><h2>Allow-shaped case</h2><div class="stat" id="allow">—</div><p class="muted">Not external authorization</p></div><div class="card"><h2>Simulated blocks</h2><div class="stat" id="blocks">—</div></div><div class="card"><h2>Real payments</h2><div class="stat" id="payments">0</div><p class="muted">None performed</p></div></section>
+<section class="card"><h2>External verification status</h2><dl id="verification"><dt>Status</dt><dd>Loading…</dd></dl></section><section class="card"><h2>Latest scenario</h2><dl id="latest"><dt>Status</dt><dd>Loading…</dd></dl></section><section class="card"><h2>Audit trail</h2><ul id="audit"><li>Loading synthetic scenarios…</li></ul></section>
+<footer>All scenario events are synthetic fixtures. This dashboard does not connect to PayPal, OpenAI, a KYAPay issuer, or a production fraud-risk service. <p>Static snapshot, not live telemetry.</p><p class="build">Artifact commit: <code id="build-commit">__TRUSTGUARD_BUILD_COMMIT__</code></p></footer>
+</main><script>
+"use strict";
+const $=id=>document.getElementById(id);
+function node(tag,value){const n=document.createElement(tag);n.textContent=value==null?"Not provided":String(value);return n}
+function pair(p,k,v){p.append(node("dt",k),node("dd",v))}
+function fail(message){$("snapshot-meta").textContent="UNKNOWN_BLOCKED — snapshot or build identity unavailable/invalid.";const v=$("verification");v.replaceChildren();pair(v,"Decision","UNKNOWN_BLOCKED — no authorization attempted");$("audit").replaceChildren(node("li",message));$("payments").textContent="0"}
+function record(v){return v!==null&&typeof v==="object"&&!Array.isArray(v)}
+function validSnapshot(d){
+ if(!record(d)||d.schema_version!==1||d.demo_mode!=="SIMULATED"||d.data_source!=="synthetic_local_fixture"||d.external_provider_calls!==false||d.real_payment_executed!==false)return false;
+ if(!record(d.statistics)||d.statistics.real_payments!==0||!Number.isInteger(d.statistics.simulated_scenarios)||d.statistics.simulated_scenarios<1||!Array.isArray(d.audit_trail)||!record(d.verification_capabilities)||!record(d.latest_scenario))return false;
+ const time=Date.parse(d.generated_at);const now=Date.now();if(!Number.isFinite(time)||time>now+300000||now-time>86400000)return false;
+ for(const k of ["kyapay_issuer","merchant_identity","dpop_signature"])if(d.verification_capabilities[k]!=="UNVERIFIED")return false;
+ if(d.verification_capabilities.paypal_authorization!=="NOT_ATTEMPTED"||d.latest_scenario.status!=="NOT_EXECUTED")return false;
+ return d.audit_trail.length<=100&&d.audit_trail.every(e=>record(e)&&typeof e.event==="string"&&e.event.length<=200&&typeof e.result==="string"&&e.result.length<=300&&["SIMULATED","UNKNOWN_BLOCKED"].includes(e.classification));
+}
+async function fetchLocal(path){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),5000);try{const r=await fetch(path,{signal:controller.signal,cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);return await r.json()}finally{clearTimeout(timer)}}
+async function start(){try{
+ const manifest=await fetchLocal("build-info.json");const meta=document.querySelector('meta[name="trustguard-build-commit"]').content;const visible=$("build-commit").textContent;
+ if(!record(manifest)||manifest.application!=="PayPal AI Trust Engine"||manifest.status!=="UNVERIFIED_STATIC_FRONTEND"||!/^[0-9a-f]{40}$/.test(meta)||manifest.frontend_commit!==meta||visible!==meta)throw Error("Artifact identity mismatch");
+ const d=await fetchLocal("hasil_demo.json");if(!validSnapshot(d))throw Error("Invalid, stale, or unsupported snapshot contract");
+ $("snapshot-meta").textContent="Mode: SIMULATED · source: "+d.data_source+" · generated: "+d.generated_at+" · artifact SHA verified";
+ $("scenarios").textContent=String(d.statistics.simulated_scenarios);$("allow").textContent=String(d.statistics.simulated_allow);$("blocks").textContent=String(d.statistics.simulated_block);$("payments").textContent="0";
+ const v=$("verification");v.replaceChildren();Object.entries(d.verification_capabilities).forEach(([k,x])=>pair(v,k,x));
+ const l=$("latest");l.replaceChildren();pair(l,"Scenario",d.latest_scenario.id);pair(l,"Status",d.latest_scenario.status);pair(l,"Merchant",d.latest_scenario.merchant);pair(l,"Amount","Not supplied; no payment");
+ const a=$("audit");a.replaceChildren();d.audit_trail.forEach(e=>{const li=document.createElement("li");li.append(node("strong",e.event),document.createElement("br"),node("span",e.classification+" · "+e.result));a.append(li)});
+ }catch(e){fail("Fail-closed: "+(e&&e.message?e.message:"snapshot validation failed"))}}
+start();
+</script></body></html>

@@ -1,0 +1,32 @@
+name: Dashboard and Pages artifact tests
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [codex/stage-5-3-dashboard-repair]
+permissions:
+  contents: read
+jobs:
+  dashboard-tests:
+    # GitHub-hosted runner images are maintained by GitHub and updated with
+    # supported runner releases; Node 24 actions require runner v2.327.1+.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Compile Python modules
+        run: python -m compileall -q .
+      - name: Install browser test dependency
+        run: python -m pip install playwright
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Build artifact from this checkout
+        run: python build_pages.py
+      - name: Test frontend contract
+        run: python -m unittest -v frontend_tests
+      - name: Test Pages artifact contract
+        run: python -m unittest -v pages_artifact_tests
+      - name: Test browser behavior
+        run: python -m unittest -v frontend_browser_tests

@@ -1,31 +1,14 @@
 {
-    "timestamp": "2026-10-21 08:55:52",
-    "transaksi_terakhir": {
-        "order_id": "1U9063377E719994A",
-        "status": "SUCCESS",
-        "merchant": "api.merchant.com",
-        "total": "USD 50.00"
-    },
-    "statistik": {
-        "total_sukses": 4,
-        "total_diblokir": 6,
-        "tingkat_keamanan": "100%"
-    },
-    "audit_trail": [
-        {
-            "waktu": "08:55",
-            "event": "Live E2E Run",
-            "hasil": "SUCCESS"
-        },
-        {
-            "waktu": "08:16",
-            "event": "Replay Attack",
-            "hasil": "DIBLOKIR"
-        },
-        {
-            "waktu": "08:17",
-            "event": "DPoP URL Mismatch",
-            "hasil": "DITOLAK"
-        }
-    ]
+  "schema_version": 1,
+  "source_status": "UNVERIFIED",
+  "timestamp": null,
+  "transaksi_terakhir": {
+    "order_id": null,
+    "authentication_status": "UNKNOWN",
+    "policy_status": "UNKNOWN",
+    "delivery_status": "UNKNOWN",
+    "merchant": null,
+    "total": null
+  },
+  "audit_trail": []
 }
