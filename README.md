@@ -228,7 +228,7 @@ source .venv/bin/activate
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -r requirements-security.txt pyyaml playwright
+python -m pip install -r requirements-ci.lock
 python -m playwright install chromium
 ```
 
@@ -245,7 +245,7 @@ The hardened entry point no longer creates a PayPal order when imported or run d
 Install the dedicated verifier dependencies and run the automated tests:
 
 ```bash
-python -m pip install -r requirements-security.txt
+python -m pip install -r requirements-runtime.lock
 python -m unittest -v security_tests
 ```
 
@@ -366,7 +366,7 @@ Use Python 3.12 or a compatible supported version:
 python -m venv .venv
 # Activate the environment, then:
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt pyyaml playwright
+python -m pip install -r requirements-ci.lock
 python -m playwright install chromium
 python -m compileall -q .
 python -m pytest -q test_api.py
@@ -375,9 +375,19 @@ python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests 
 
 The new API tests use FastAPI's test client and monkeypatched AI functions. They do not call OpenAI or PayPal. Existing regression tests remain required.
 
+
+### Dependency locking and safe updates
+
+- `requirements.txt` delegates to `requirements-runtime.lock`, which pins the complete reviewed runtime dependency set to exact versions.
+- `requirements-ci.lock` includes the runtime lock plus exact versions for pytest, PyYAML, Playwright, and their test-time dependencies. Stage 1 CI installs from this file, not from floating version ranges.
+- `requirements-security.txt` pins the JWT/cryptography security dependencies exactly for standalone security-test workflows.
+- The current lock files pin versions but do not yet include package hashes. Do not add fabricated hashes. To introduce hash-checking, generate and review hashes for all supported Python 3.12 distributions (including wheels and source distributions) with a trusted resolver, then use pip's `--require-hashes` mode consistently in CI and deployment.
+
+For a dependency update, use a clean Python 3.12 virtual environment. Review the upstream release notes and supported Python versions, update the direct dependency specification and the appropriate lock files together, resolve all transitive dependencies with a reviewed resolver, and run compilation, API tests, the complete regression suite, and browser/artifact checks. Inspect the resulting lock diff for unexpected packages or version changes. Do not use a developer's ambient environment as an unreviewed source of a lockfile, and do not merge while CI is red.
+
 ### Render Web Service preparation (not deployed)
 
-- Build command: `pip install -r requirements.txt`
+- Build command: `pip install -r requirements-runtime.lock`
 - Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
 
 Set the environment variables above in the Render service configuration. Do not configure production secrets in GitHub. The service binds to the platform-provided `PORT`.
