@@ -331,3 +331,64 @@ Provider I/O occurs outside the database transaction. The dispatcher records dis
 **Deployment limit:** SQLite is supported only for processes on one host sharing the same persistent local database and correct filesystem locking. It is not a multi-host/distributed spend ledger. The constructor requires an explicit `deployment_mode="single-host"` (or `TRUSTGUARD_DEPLOYMENT_MODE=single-host`); missing or multi-host mode is rejected. Do not run this configuration across multiple hosts. A shared atomic store and deployment-specific integration must be implemented and tested before multi-instance operation.
 
 **External contract limit:** the code deliberately requires the caller to supply a stable authoritative grant ID rather than guessing a KYAPay claim name. The issuer's grant schema and PayPal merchant mapping remain unconfirmed. No real payment, authorization, capture, or deployment was performed by the regression tests.
+
+
+---
+
+## Stage 1 — FastAPI AI assistance backend (feature branch)
+
+The Stage 1 implementation adds a separate ASGI HTTP boundary for **advisory AI responses only**. It does not import the transaction dispatcher and cannot create PayPal orders, authorize/capture payments, or change transaction-security decisions.
+
+### Endpoints
+
+- `GET /healthz` — minimal process health.
+- `GET /readyz` — reports whether the OpenAI SDK, OpenAI credential presence, and client-authentication configuration are present. It does not call OpenAI and does not prove provider connectivity.
+- `POST /v1/ai/respond` — accepts a JSON object containing only a `prompt` string, requires a bearer token, applies a body-size cap and process-local rate limit, then calls OpenAI from the backend and returns filtered text.
+
+Interactive API documentation is disabled in this prototype. The AI endpoint is not a payment endpoint and its output is untrusted advisory content.
+
+### Runtime environment variables
+
+Configure these in the backend runtime environment only; never put values in Git, frontend files, static JSON, or build artifacts:
+
+- `OPENAI_API_KEY` — required to make a real OpenAI request.
+- `OPENAI_MODEL` — optional model name; defaults to `gpt-4.1-mini`.
+- `TRUSTGUARD_API_BEARER_TOKEN` — required client bearer token; must be at least 32 characters.
+- `TRUSTGUARD_CORS_ORIGINS` — optional comma-separated allowlist of exact browser origins. Default is no cross-origin browser origins.
+
+No secret values are included in this documentation. Tests use synthetic values and mock all OpenAI calls.
+
+### Local setup and tests
+
+Use Python 3.12 or a compatible supported version:
+
+```bash
+python -m venv .venv
+# Activate the environment, then:
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt pyyaml playwright
+python -m playwright install chromium
+python -m compileall -q .
+python -m pytest -q test_api.py
+python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
+```
+
+The new API tests use FastAPI's test client and monkeypatched AI functions. They do not call OpenAI or PayPal. Existing regression tests remain required.
+
+### Render Web Service preparation (not deployed)
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+
+Set the environment variables above in the Render service configuration. Do not configure production secrets in GitHub. The service binds to the platform-provided `PORT`.
+
+### Security and limitations
+
+- The bearer token is read only from the server environment and compared using `hmac.compare_digest`. This is a shared-token prototype, not a full identity system or token-rotation service.
+- The request body is capped at 16 KiB; prompt length is capped at 4,000 characters.
+- The rate limiter uses in-memory process-local state (20 requests per client host per 60 seconds). It is not distributed, is reset on restart, and is not suitable for multi-instance enforcement. A shared atomic rate-limit store is required for that.
+- CORS is an origin policy, not authentication. No browser origins are allowed unless explicitly configured.
+- OpenAI calls have a 20-second timeout and automatic retries disabled. Provider errors return controlled 502/503/504 responses. Prompts and provider error details are not logged.
+- The readiness endpoint reports configuration presence only; it does not verify credentials with OpenAI.
+- No PayPal modules are imported by the AI API. AI output cannot authorize or execute transactions.
+- The backend is not production-ready. Official KYAPay contracts, PayPal merchant mapping/provider adapter, distributed replay and spend stores, provider idempotency/reconciliation, deployment protections, and external interoperability remain unverified.
