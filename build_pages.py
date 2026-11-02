@@ -59,7 +59,8 @@ manifest = {
 <p>Security prototype dashboard. Static status is unverified and is not proof of a live transaction or production security.</p>
 <ul>
 <li><a href="dashboard.html">Dashboard</a></li>
-<li><a href="dashboard_v2.html">Dashboard v2</a></li>\n<li><a href="dashboard_demo.html">Offline synthetic demo</a></li>
+<li><a href="dashboard_v2.html">Dashboard v2</a></li>
+<li><a href="dashboard_demo.html">Offline synthetic demo</a></li>
 </ul>
 <p>Frontend build commit: <code id="build-commit">{sha}</code></p>
 <p>Authentication, policy, and delivery status: UNKNOWN until verified backend telemetry is connected.</p>

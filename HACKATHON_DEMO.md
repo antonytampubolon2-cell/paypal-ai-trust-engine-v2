@@ -4,7 +4,9 @@
 This is an offline, synthetic demonstration of authorization-boundary concepts. It does not call PayPal or OpenAI, create or capture orders, move money, or verify a KYAPay issuer, merchant identity, DPoP signature, or live fraud score. The dashboard is a static snapshot, not live telemetry. Its “allow-shaped” case is a simulated scenario, not authorization.
 
 ## Reproduce from the release-candidate checkout
-The generator uses only the Python standard library. Full tests use Python 3.12, Playwright, and Chromium. From the repository root:
+The generator uses only the Python standard library. Full tests use Python 3.12, Playwright, and Chromium. From the repository root, set the commit identity used by the artifact tests:
+
+    export GITHUB_SHA="$(git rev-parse HEAD)"
 
     python -m compileall -q .
     python build_pages.py
