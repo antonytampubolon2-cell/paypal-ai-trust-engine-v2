@@ -20,7 +20,10 @@ def auth_token(monkeypatch):
 
 @pytest.fixture
 def client():
-    return TestClient(api.app)
+    # Assert the HTTP response produced by the app's generic 500 handler.
+    # Starlette's default TestClient setting re-raises server exceptions after
+    # the response is sent, which would bypass this response-level assertion.
+    return TestClient(api.app, raise_server_exceptions=False)
 
 
 def auth_headers():
