@@ -1,3 +1,6 @@
-# Runtime security dependencies: update deliberately and regenerate the reviewed lock files.
+# Exact security-test dependencies for Python 3.12.
+# Transitive cryptography dependencies are pinned too.
 PyJWT[crypto]==2.15.1
 cryptography==46.0.7
+cffi==2.1.1
+pycparser==3.12
