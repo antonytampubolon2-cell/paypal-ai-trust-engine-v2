@@ -228,7 +228,7 @@ source .venv/bin/activate
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -r requirements-security.txt pyyaml playwright
+python -m pip install -r requirements-ci.lock
 python -m playwright install chromium
 ```
 
@@ -245,7 +245,7 @@ The hardened entry point no longer creates a PayPal order when imported or run d
 Install the dedicated verifier dependencies and run the automated tests:
 
 ```bash
-python -m pip install -r requirements-security.txt
+python -m pip install -r requirements-runtime.lock
 python -m unittest -v security_tests
 ```
 
@@ -331,3 +331,74 @@ Provider I/O occurs outside the database transaction. The dispatcher records dis
 **Deployment limit:** SQLite is supported only for processes on one host sharing the same persistent local database and correct filesystem locking. It is not a multi-host/distributed spend ledger. The constructor requires an explicit `deployment_mode="single-host"` (or `TRUSTGUARD_DEPLOYMENT_MODE=single-host`); missing or multi-host mode is rejected. Do not run this configuration across multiple hosts. A shared atomic store and deployment-specific integration must be implemented and tested before multi-instance operation.
 
 **External contract limit:** the code deliberately requires the caller to supply a stable authoritative grant ID rather than guessing a KYAPay claim name. The issuer's grant schema and PayPal merchant mapping remain unconfirmed. No real payment, authorization, capture, or deployment was performed by the regression tests.
+
+
+---
+
+## Stage 1 — FastAPI AI assistance backend (feature branch)
+
+The Stage 1 implementation adds a separate ASGI HTTP boundary for **advisory AI responses only**. It does not import the transaction dispatcher and cannot create PayPal orders, authorize/capture payments, or change transaction-security decisions.
+
+### Endpoints
+
+- `GET /healthz` — minimal process health.
+- `GET /readyz` — reports whether the OpenAI SDK, OpenAI credential presence, and client-authentication configuration are present. It does not call OpenAI and does not prove provider connectivity.
+- `POST /v1/ai/respond` — accepts a JSON object containing only a `prompt` string, requires a bearer token, applies a body-size cap and process-local rate limit, then calls OpenAI from the backend and returns filtered text.
+
+Interactive API documentation is disabled in this prototype. The AI endpoint is not a payment endpoint and its output is untrusted advisory content.
+
+### Runtime environment variables
+
+Configure these in the backend runtime environment only; never put values in Git, frontend files, static JSON, or build artifacts:
+
+- `OPENAI_API_KEY` — required to make a real OpenAI request.
+- `OPENAI_MODEL` — optional model name; defaults to `gpt-4.1-mini`.
+- `TRUSTGUARD_API_BEARER_TOKEN` — required client bearer token; must be at least 32 characters.
+- `TRUSTGUARD_CORS_ORIGINS` — optional comma-separated allowlist of exact browser origins. Default is no cross-origin browser origins.
+
+No secret values are included in this documentation. Tests use synthetic values and mock all OpenAI calls.
+
+### Local setup and tests
+
+Use Python 3.12 or a compatible supported version:
+
+```bash
+python -m venv .venv
+# Activate the environment, then:
+python -m pip install --upgrade pip
+python -m pip install -r requirements-ci.lock
+python -m playwright install chromium
+python -m compileall -q .
+python -m pytest -q test_api.py
+python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
+```
+
+The new API tests use FastAPI's test client and monkeypatched AI functions. They do not call OpenAI or PayPal. Existing regression tests remain required.
+
+
+### Dependency locking and safe updates
+
+- `requirements.txt` delegates to `requirements-runtime.lock`, which pins the complete reviewed runtime dependency set to exact versions.
+- `requirements-ci.lock` includes the runtime lock plus exact versions for pytest, PyYAML, Playwright, and their test-time dependencies. Stage 1 CI installs from this file, not from floating version ranges.
+- `requirements-security.txt` pins the JWT/cryptography security dependencies exactly for standalone security-test workflows.
+- The current lock files pin versions but do not yet include package hashes. Do not add fabricated hashes. To introduce hash-checking, generate and review hashes for all supported Python 3.12 distributions (including wheels and source distributions) with a trusted resolver, then use pip's `--require-hashes` mode consistently in CI and deployment.
+
+For a dependency update, use a clean Python 3.12 virtual environment. Review the upstream release notes and supported Python versions, update the direct dependency specification and the appropriate lock files together, resolve all transitive dependencies with a reviewed resolver, and run compilation, API tests, the complete regression suite, and browser/artifact checks. Inspect the resulting lock diff for unexpected packages or version changes. Do not use a developer's ambient environment as an unreviewed source of a lockfile, and do not merge while CI is red.
+
+### Render Web Service preparation (not deployed)
+
+- Build command: `pip install -r requirements-runtime.lock`
+- Start command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+
+Set the environment variables above in the Render service configuration. Do not configure production secrets in GitHub. The service binds to the platform-provided `PORT`.
+
+### Security and limitations
+
+- The bearer token is read only from the server environment and compared using `hmac.compare_digest`. This is a shared-token prototype, not a full identity system or token-rotation service.
+- The request body is capped at 16 KiB; prompt length is capped at 4,000 characters.
+- The rate limiter uses in-memory process-local state (20 requests per client host per 60 seconds). It is not distributed, is reset on restart, and is not suitable for multi-instance enforcement. A shared atomic rate-limit store is required for that.
+- CORS is an origin policy, not authentication. No browser origins are allowed unless explicitly configured.
+- OpenAI calls have a 20-second timeout and automatic retries disabled. Provider errors return controlled 502/503/504 responses. Prompts and provider error details are not logged.
+- The readiness endpoint reports configuration presence only; it does not verify credentials with OpenAI.
+- No PayPal modules are imported by the AI API. AI output cannot authorize or execute transactions.
+- The backend is not production-ready. Official KYAPay contracts, PayPal merchant mapping/provider adapter, distributed replay and spend stores, provider idempotency/reconciliation, deployment protections, and external interoperability remain unverified.

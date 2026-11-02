@@ -17,7 +17,7 @@ jobs:
       - name: Compile Python modules
         run: python -m compileall -q .
       - name: Install security dependencies
-        run: python -m pip install -r requirements-security.txt
+        run: python -m pip install -r requirements-ci.lock
       - name: Test security primitives and dispatcher
         run: python -m unittest -v security_tests
       - name: Test PayPal REST item schema and amount binding

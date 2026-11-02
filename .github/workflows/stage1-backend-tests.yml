@@ -1,0 +1,28 @@
+name: Stage 1 FastAPI backend tests
+on:
+  push:
+    branches: [codex/stage-1-fastapi-backend-foundation]
+  pull_request:
+    branches: [codex/trustguard-system-audit]
+permissions:
+  contents: read
+jobs:
+  stage1-backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Compile Python modules
+        run: python -m compileall -q .
+      - name: Install runtime and regression dependencies
+        run: python -m pip install -r requirements-ci.lock
+      - name: Run FastAPI contract and security tests (mocked provider)
+        run: python -m pytest -q test_api.py
+      - name: Install Chromium for browser regressions
+        run: python -m playwright install --with-deps chromium
+      - name: Build Pages artifact from this checkout
+        run: python build_pages.py
+      - name: Run existing transaction, frontend, artifact, browser, and release regressions
+        run: python -m unittest -v security_tests paypal_rest_tests spend_reservations_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
