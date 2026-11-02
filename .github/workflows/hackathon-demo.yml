@@ -1,0 +1,19 @@
+name: Hackathon demo safety checks
+on:
+  push:
+    branches: [codex/hackathon-fast-track-demo]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  demo-safety:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - run: python -m compileall -q main_public.py demo_validation_tests.py
+      - run: python -m unittest -v demo_validation_tests
+      - run: python main_public.py --output /tmp/hasil-generated.json
