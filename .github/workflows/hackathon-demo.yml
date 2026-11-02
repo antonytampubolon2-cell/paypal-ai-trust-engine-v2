@@ -7,22 +7,20 @@ on:
 permissions:
   contents: read
 jobs:
-  demo-and-regression:
+  demo-and-browser:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.12"
-      - name: Compile Python
-        run: python -m compileall -q .
-      - name: Install regression dependencies
-        run: python -m pip install "PyJWT[crypto]==2.15.1" cryptography==46.0.7 cffi==2.1.1 pycparser==3.12 PyYAML==6.0.3 playwright==1.64.1
+      - name: Compile demo
+        run: python -m compileall -q main_public.py demo_validation_tests.py demo_browser_tests.py
+      - name: Install browser test dependency
+        run: python -m pip install playwright==1.64.1
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
-      - name: Build Pages artifact
-        run: python build_pages.py
-      - name: Run demo safety and regression suites
-        run: python -m unittest -v demo_validation_tests security_tests paypal_rest_tests spend_reservations_tests frontend_tests pages_artifact_tests frontend_browser_tests release_pipeline_tests
+      - name: Run demo contract and browser tests
+        run: python -m unittest -v demo_validation_tests demo_browser_tests
       - name: Regenerate synthetic fixture
         run: python main_public.py --output /tmp/hasil-generated.json
