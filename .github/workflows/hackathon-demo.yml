@@ -17,7 +17,7 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q .
       - name: Install regression dependencies
-        run: python -m pip install -r requirements-security.txt PyYAML==6.0.3 playwright==1.64.1
+        run: python -m pip install "PyJWT[crypto]==2.15.1" cryptography==46.0.7 cffi==2.1.1 pycparser==3.12 PyYAML==6.0.3 playwright==1.64.1
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
       - name: Build Pages artifact
