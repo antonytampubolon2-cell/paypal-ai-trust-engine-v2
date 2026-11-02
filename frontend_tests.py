@@ -1,0 +1,126 @@
+"""Regression checks for the static TrustGuard dashboard and its JSON contract.
+
+These tests inspect the shipped HTML/JSON contract; they do not certify the live
+browser, backend telemetry, or production security.
+"""
+import json
+import pathlib
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parent
+
+
+class FrontendHardeningTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dashboard = (ROOT / "dashboard.html").read_text(encoding="utf-8")
+        cls.dashboard_v2 = (ROOT / "dashboard_v2.html").read_text(encoding="utf-8")
+        cls.data = json.loads((ROOT / "hasil.json").read_text(encoding="utf-8"))
+
+    def test_json_has_explicit_unverified_source_and_no_unsupported_metrics(self):
+        self.assertEqual(self.data["schema_version"], 1)
+        self.assertEqual(self.data["source_status"], "UNVERIFIED")
+        self.assertIsNone(self.data["timestamp"])
+        self.assertNotIn("statistik", self.data)
+        self.assertNotIn("tingkat_keamanan", json.dumps(self.data))
+        self.assertEqual(self.data["audit_trail"], [])
+
+    def test_transaction_statuses_are_separate_and_unknown_by_default(self):
+        trx = self.data["transaksi_terakhir"]
+        self.assertEqual(trx["authentication_status"], "UNKNOWN")
+        self.assertEqual(trx["policy_status"], "UNKNOWN")
+        self.assertEqual(trx["delivery_status"], "UNKNOWN")
+        self.assertIsNone(trx["order_id"])
+        self.assertIsNone(trx["merchant"])
+        self.assertIsNone(trx["total"])
+
+    def test_both_dashboards_expose_same_build_identity_contract(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            self.assertIn('name="trustguard-build-commit"', html)
+            self.assertIn('content="__TRUSTGUARD_BUILD_COMMIT__"', html)
+            self.assertIn('id="build-commit"', html)
+            self.assertIn("__TRUSTGUARD_BUILD_COMMIT__", html)
+        self.assertIn("source identity is not transaction evidence", self.dashboard)
+        self.assertIn("source identity is not transaction evidence", self.dashboard_v2)
+
+    def test_both_dashboards_consume_the_same_fail_closed_static_data(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="dashboard_v2" if html is self.dashboard_v2 else "dashboard"):
+                self.assertIn('fetchWithTimeout("hasil.json"', html)
+                self.assertIn("source_status", html)
+                self.assertIn("authentication_status", html)
+                self.assertIn("policy_status", html)
+                self.assertIn('"UNVERIFIED"', html)
+                self.assertIn('"UNKNOWN"', html)
+
+    def test_dashboard_never_uses_inner_html(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            self.assertNotIn("innerHTML", html.lower())
+
+    def test_dynamic_dashboard_validates_json_structure_and_types(self):
+        for required in (
+            "function validateDashboardData(data)",
+            "data.schema_version !== 1",
+            'data.source_status !== "UNVERIFIED"',
+            "isRecord(data.transaksi_terakhir)",
+            "trx.authentication_status !== \"UNKNOWN\"",
+            "trx.policy_status !== \"UNKNOWN\"",
+            "typeof trx.delivery_status !== \"string\"",
+            "Array.isArray(data.audit_trail)",
+            "data.audit_trail.every(item =>",
+        ):
+            self.assertIn(required, self.dashboard_v2)
+
+    def test_dynamic_rendering_uses_text_nodes_and_safe_dom_apis(self):
+        self.assertIn("textContent", self.dashboard_v2)
+        self.assertIn("document.createElement", self.dashboard_v2)
+        self.assertIn("replaceChildren()", self.dashboard_v2)
+        self.assertNotIn("insertAdjacentHTML", self.dashboard_v2)
+        self.assertNotIn("document.write(", self.dashboard_v2)
+
+    def test_order_created_is_never_described_as_payment_success(self):
+        self.assertIn("UNVERIFIED · ORDER_CREATED (klaim file) — order dibuat; bukan pembayaran sukses atau capture", self.dashboard_v2)
+        self.assertIn("bukan status capture", self.dashboard_v2)
+        self.assertIn("pembayaran selesai, capture", self.dashboard)
+        self.assertNotIn('"status": "SUCCESS"', json.dumps(self.data))
+        self.assertNotIn('"delivery_status": "SUCCEEDED"', json.dumps(self.data))
+
+    def test_static_pages_do_not_claim_security_is_active_or_perfect(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            self.assertNotIn("tingkat keamanan 100%", html)
+            self.assertNotIn(">100%<", html)
+            self.assertNotIn(">AKTIF<", html)
+        self.assertIn("belum terhubung", self.dashboard.lower())
+        self.assertIn("BELUM DIVERIFIKASI", self.dashboard_v2)
+
+    def test_both_dashboards_verify_manifest_identity_before_data(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
+                self.assertIn('fetchWithTimeout("build-info.json"', html)
+                self.assertIn('manifest.frontend_commit !== metaSha', html)
+                self.assertIn("function verifyBuildIdentity()", html)
+
+    def test_both_dashboards_reject_stale_and_future_timestamps(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
+                self.assertIn("MAX_DATA_AGE_MS", html)
+                self.assertIn("MAX_FUTURE_SKEW_MS", html)
+                self.assertIn("Date.parse", html)
+                self.assertIn("now -", html)
+
+    def test_dynamic_audit_results_are_constrained_and_labelled_unverified(self):
+        self.assertIn("AUDIT_RESULTS.has(item.hasil)", self.dashboard_v2)
+        self.assertIn("UNVERIFIED CLAIM · ", self.dashboard_v2)
+        self.assertIn('allowed.has(item.hasil)', self.dashboard)
+
+    def test_both_dashboards_apply_abortable_fetch_timeouts(self):
+        for html in (self.dashboard, self.dashboard_v2):
+            with self.subTest(dashboard="v2" if html is self.dashboard_v2 else "primary"):
+                self.assertIn("AbortController", html)
+                self.assertIn("FETCH_TIMEOUT_MS", html)
+                self.assertIn("fetchWithTimeout(\"build-info.json\"", html)
+                self.assertIn("fetchWithTimeout(\"hasil.json\"", html)
+
+
+if __name__ == "__main__":
+    unittest.main()
