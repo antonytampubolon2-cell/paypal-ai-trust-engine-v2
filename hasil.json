@@ -1,31 +1,55 @@
 {
-    "timestamp": "2026-10-21 08:55:52",
-    "transaksi_terakhir": {
-        "order_id": "1U9063377E719994A",
-        "status": "SUCCESS",
-        "merchant": "api.merchant.com",
-        "total": "USD 50.00"
+  "schema_version": 1,
+  "generated_at": "2026-11-02T00:00:00+00:00",
+  "demo_mode": "SIMULATED",
+  "data_source": "synthetic_local_fixture",
+  "external_provider_calls": false,
+  "real_payment_executed": false,
+  "notice": "Synthetic only: no PayPal/OpenAI request, KYAPay issuer, merchant identity, or DPoP signature was verified.",
+  "verification_capabilities": {
+    "kyapay_issuer": "UNVERIFIED",
+    "merchant_identity": "UNVERIFIED",
+    "dpop_signature": "UNVERIFIED",
+    "paypal_authorization": "NOT_ATTEMPTED"
+  },
+  "statistics": {
+    "simulated_scenarios": 4,
+    "simulated_allow": 1,
+    "simulated_block": 2,
+    "fail_closed_unknown": 1,
+    "real_payments": 0
+  },
+  "latest_scenario": {
+    "id": "SYNTHETIC-ONLY",
+    "status": "NOT_EXECUTED",
+    "merchant": "UNVERIFIED — synthetic placeholder",
+    "amount": null,
+    "currency": null
+  },
+  "audit_trail": [
+    {
+      "time": "scenario-01",
+      "event": "Structurally complete synthetic grant",
+      "result": "SIMULATED_ALLOW — not issuer verified",
+      "classification": "SIMULATED"
     },
-    "statistik": {
-        "total_sukses": 4,
-        "total_diblokir": 6,
-        "tingkat_keamanan": "100%"
+    {
+      "time": "scenario-02",
+      "event": "Repeated synthetic token identifier",
+      "result": "SIMULATED_BLOCK",
+      "classification": "SIMULATED"
     },
-    "audit_trail": [
-        {
-            "waktu": "08:55",
-            "event": "Live E2E Run",
-            "hasil": "SUCCESS"
-        },
-        {
-            "waktu": "08:16",
-            "event": "Replay Attack",
-            "hasil": "DIBLOKIR"
-        },
-        {
-            "waktu": "08:17",
-            "event": "DPoP URL Mismatch",
-            "hasil": "DITOLAK"
-        }
-    ]
+    {
+      "time": "scenario-03",
+      "event": "Expired synthetic grant",
+      "result": "SIMULATED_BLOCK",
+      "classification": "SIMULATED"
+    },
+    {
+      "time": "scenario-04",
+      "event": "DPoP signature verification unavailable",
+      "result": "FAIL_CLOSED — external authorization not attempted",
+      "classification": "UNKNOWN_BLOCKED"
+    }
+  ]
 }
