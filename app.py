@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from skyfire_auth import SkyfireSettings, SkyfireTokenError, SkyfireTokenVerifier
-from trustguard import Ledger, SecurityError
+from trustguard import Ledger
 
 
 class SkyfireAuthorizationSignal(BaseModel):
@@ -68,7 +68,7 @@ def create_app(*, settings: SkyfireSettings | None = None, ledger: Ledger | None
         response_model=AuthorizationResponse,
         tags=["agent"],
         summary="Validate a Skyfire token",
-        responses={401: {"description": "Token missing, invalid, or already used"}, 503: {"description": "Service configuration or replay store unavailable"}},
+        responses={401: {"description": "Token missing or invalid"}, 503: {"description": "Service configuration or durable ledger unavailable"}},
     )
     def authorize(skyfire_pay_id: str = Header(..., alias="skyfire-pay-id")) -> AuthorizationResponse:
         if not application.state.ready:
@@ -77,13 +77,6 @@ def create_app(*, settings: SkyfireSettings | None = None, ledger: Ledger | None
             verified = verifier.verify(skyfire_pay_id)
         except SkyfireTokenError:
             raise HTTPException(status_code=401, detail="Skyfire token validation failed") from None
-        try:
-            ledger.claim_replay_id("skyfire", verified["jti"], float(verified["exp"]))
-        except SecurityError:
-            raise HTTPException(status_code=401, detail="Skyfire token validation failed") from None
-        except Exception:
-            raise HTTPException(status_code=503, detail="authorization replay store unavailable") from None
-
         payment = None
         if verified["amount"] is not None:
             amount = verified["amount"]
@@ -97,7 +90,7 @@ def create_app(*, settings: SkyfireSettings | None = None, ledger: Ledger | None
             token_type=verified["token_type"],
             buyer_agent_account_id=verified["sub"],
             seller_agent_account_id=verified["aud"],
-            seller_service_id=verified["ssi"],
+            seller_service_id=verified["tsi"],
             skyfire_payment_authorization=payment,
             paypal_payment_status="NOT_STARTED",
             paypal_payment_authorized=False,
