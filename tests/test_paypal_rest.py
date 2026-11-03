@@ -183,6 +183,17 @@ def test_order_timeout_is_ambiguous_and_not_retried(monkeypatch):
     assert session.calls[1][1] == SANDBOX_BASE_URL + ORDERS_PATH
 
 
+def test_order_idempotency_conflict_is_ambiguous(monkeypatch):
+    session = FakeSession(post=[
+        FakeResponse(200, {"access_token": "token", "expires_in": 3600}),
+        FakeResponse(409, {"name": "ORDER_ALREADY_EXISTS"}),
+    ])
+    api = provider(monkeypatch, session)
+    with pytest.raises(ProviderAmbiguousError):
+        api.create_order(tx())
+    assert len(session.calls) == 2
+
+
 @pytest.mark.parametrize("bad_response", [
     FakeResponse(201, None, json_error=True),
     FakeResponse(201, {"status": "CREATED", "purchase_units": []}),

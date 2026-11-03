@@ -140,6 +140,8 @@ class PayPalRestOrdersProvider:
         except requests.RequestException as e:
             raise ProviderAmbiguousError("PayPal order request outcome is unknown") from e
         if response.status_code < 200 or response.status_code >= 300:
+            if response.status_code == 409:
+                raise ProviderAmbiguousError("PayPal reported a conflicting order request; reconciliation is required")
             if 400 <= response.status_code < 500:
                 raise ProviderDefinitiveError("PayPal rejected the order request")
             raise ProviderAmbiguousError("PayPal order request outcome is unknown")

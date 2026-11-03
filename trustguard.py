@@ -229,7 +229,8 @@ class Ledger:
                 os.fchmod(fd, 0o600)
             finally:
                 os.close(fd)
-        with self._connect() as db:
+        db = self._connect()
+        try:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS transactions (
                     transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
@@ -242,7 +243,9 @@ class Ledger:
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()[0]
             if "'APPROVED'" not in schema:
-                db.executescript("""
+                try:
+                    db.executescript("""
+                    BEGIN IMMEDIATE;
                     CREATE TABLE transactions_new (
                         transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
                         amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT NOT NULL,
@@ -255,7 +258,14 @@ class Ledger:
                     DROP TABLE transactions;
                     ALTER TABLE transactions_new RENAME TO transactions;
                     CREATE INDEX tx_grant_status ON transactions(grant_id,status);
-                """)
+                    COMMIT;
+                    """)
+                except Exception:
+                    if db.in_transaction:
+                        db.rollback()
+                    raise
+        finally:
+            db.close()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)

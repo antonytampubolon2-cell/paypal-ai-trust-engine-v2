@@ -171,6 +171,24 @@ def test_database_transition_failure_blocks_provider_call(tmp_path, config, sign
     assert provider.calls == []
 
 
+def test_sqlite_dispatch_state_write_failure_blocks_provider(tmp_path, config, signing_key):
+    db_path = tmp_path / "write-failure.sqlite"
+    provider = MockProvider()
+    ledger = Ledger(db_path)
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)})
+    proof = proof_token(proof_key, jwk, token)
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TRIGGER reject_dispatch BEFORE UPDATE OF status ON transactions WHEN NEW.status='DISPATCH_STARTED' BEGIN SELECT RAISE(ABORT, 'simulated disk write failure'); END")
+    db.commit()
+    db.close()
+    with pytest.raises(sqlite3.IntegrityError):
+        TrustGuard(config, ledger, provider).authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx())
+    assert provider.calls == []
+    assert Ledger(db_path).get("tx-1")["status"] == "RESERVED"
+
+
 def test_unknown_is_terminal_and_never_redispatched(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite")
     ledger.reserve("g", tx(), 10000, "USD")
@@ -208,6 +226,37 @@ def test_amount_currency_payee_mismatch_rejected(tmp_path, config, signing_key):
         proof = proof_token(proof_key, jwk, token, jti=f"proof-{index}")
         with pytest.raises(SecurityError):
             guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", bad)
+
+
+def test_amount_over_authenticated_grant_limit_is_rejected_before_dispatch(tmp_path, config, signing_key):
+    provider = MockProvider()
+    ledger = Ledger(tmp_path / "amount-limit.sqlite")
+    guard = TrustGuard(config, ledger, provider)
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    limited_grant = {"gid": "grant-canonical-42", "limit": 4999, "currency": "USD", "payees": ["merchant-1"]}
+    token = access_token(signing_key, grant=limited_grant, cnf={"jkt": jwk_thumbprint(jwk)})
+    proof = proof_token(proof_key, jwk, token)
+    with pytest.raises(SecurityError, match="spending limit"):
+        guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx(amount="50.00"))
+    assert provider.calls == []
+
+
+def test_duplicate_dispatch_after_created_is_not_repeated(tmp_path, config, signing_key):
+    provider = MockProvider({"status": "CREATED", "id": "MOCK-ORDER-1"})
+    ledger = Ledger(tmp_path / "duplicate.sqlite")
+    guard = TrustGuard(config, ledger, provider)
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    first_token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)}, jti="duplicate-token-1")
+    first_proof = proof_token(proof_key, jwk, first_token, jti="duplicate-proof-1")
+    first = guard.authorize_and_dispatch(first_token, first_proof, "POST", "https://merchant.example/pay", tx())
+    second_token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)}, jti="duplicate-token-2")
+    second_proof = proof_token(proof_key, jwk, second_token, jti="duplicate-proof-2")
+    second = guard.authorize_and_dispatch(second_token, second_proof, "POST", "https://merchant.example/pay", tx())
+    assert first["status"] == second["status"] == "CREATED"
+    assert len(provider.calls) == 1
+    assert Ledger(tmp_path / "duplicate.sqlite").get("tx-1")["provider_order_id"] == "MOCK-ORDER-1"
 
 
 def test_payload_is_exact_canonical_amount_currency_and_payee():
