@@ -1,6 +1,7 @@
 import concurrent.futures
 import inspect
 import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -226,6 +227,27 @@ def test_application_restart_persists_transaction_state(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_existing_order_created_ledger_migrates_to_created(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript("""
+      CREATE TABLE transactions (
+        transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+        amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, payee TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('RESERVED','DISPATCH_STARTED','UNKNOWN','ORDER_CREATED','FAILED')),
+        provider_order_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+      );
+      CREATE INDEX tx_grant_status ON transactions(grant_id,status);
+      CREATE TABLE replay_ids (kind TEXT NOT NULL,jti TEXT NOT NULL,expires_at REAL NOT NULL,PRIMARY KEY(kind,jti));
+      INSERT INTO transactions VALUES('legacy-tx','grant','legacy-idem',5000,'USD','merchant-1','ORDER_CREATED','OLD-ORDER',1,1);
+    """)
+    db.close()
+    ledger = Ledger(path)
+    assert ledger.get("legacy-tx")["status"] == "CREATED"
+    ledger.transition("legacy-tx", "APPROVED")
+    assert ledger.get("legacy-tx")["status"] == "APPROVED"
+
+
 def test_mock_flow_records_order_created_not_capture_and_has_idempotency(tmp_path, config, signing_key):
     proof_key = ec.generate_private_key(ec.SECP256R1())
     jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
@@ -235,11 +257,63 @@ def test_mock_flow_records_order_created_not_capture_and_has_idempotency(tmp_pat
     ledger = Ledger(tmp_path / "ledger.sqlite")
     guard = TrustGuard(config, ledger, provider)
     result = guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx())
-    assert result["status"] == "ORDER_CREATED_NOT_CAPTURED"
-    assert ledger.get("tx-1")["status"] == "ORDER_CREATED"
+    assert result["status"] == "CREATED"
+    assert ledger.get("tx-1")["status"] == "CREATED"
     assert provider.calls[0][1] == "idem-1"
     assert provider.calls[0][0] == build_paypal_order_payload(tx())
     assert ledger.get("tx-1")["provider_order_id"] == "MOCK-1"
+
+
+def test_create_response_claiming_completed_is_kept_unknown(tmp_path, config, signing_key):
+    provider = MockProvider({"status": "COMPLETED", "id": "MOCK-1", "verified_capture": True})
+    ledger = Ledger(tmp_path / "completed-create.sqlite")
+    guard = TrustGuard(config, ledger, provider)
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)})
+    proof = proof_token(proof_key, jwk, token)
+    result = guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx())
+    assert result["status"] == "UNKNOWN"
+    assert result.get("payment_completed") is not True
+    assert ledger.get("tx-1")["status"] == "UNKNOWN"
+
+
+def test_reconciliation_requires_verified_capture_to_mark_completed(tmp_path, config, signing_key):
+    provider = MockProvider(
+        {"status": "CREATED", "id": "MOCK-1"},
+        {"status": "COMPLETED", "id": "MOCK-1", "verified_capture": True},
+    )
+    ledger = Ledger(tmp_path / "reconcile.sqlite")
+    guard = TrustGuard(config, ledger, provider)
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)})
+    proof = proof_token(proof_key, jwk, token)
+    created = guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx())
+    assert created["status"] == "CREATED"
+    assert created["payment_completed"] is False
+    result = guard.reconcile("tx-1")
+    assert result["status"] == "COMPLETED"
+    assert result["payment_completed"] is True
+    assert ledger.get("tx-1")["status"] == "COMPLETED"
+
+
+def test_reconciliation_without_capture_evidence_stays_unknown(tmp_path, config, signing_key):
+    provider = MockProvider(
+        {"status": "CREATED", "id": "MOCK-1"},
+        {"status": "COMPLETED", "id": "MOCK-1"},
+    )
+    ledger = Ledger(tmp_path / "no-capture.sqlite")
+    guard = TrustGuard(config, ledger, provider)
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)})
+    proof = proof_token(proof_key, jwk, token)
+    guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx())
+    result = guard.reconcile("tx-1")
+    assert result["status"] == "UNKNOWN"
+    assert result["payment_completed"] is False
+    assert ledger.get("tx-1")["status"] == "UNKNOWN"
 
 
 def test_real_provider_dispatch_disabled_by_default(tmp_path, config):

@@ -1,18 +1,20 @@
 # PayPal AI Trust Engine — TrustGuard prototype
 
-TrustGuard is a security-focused prototype for authorization checks around AI-initiated payment orders. The current implementation is **fail-closed**: importing or running `main_public.py` makes no network calls, initializes no PayPal client, and creates no order. Real provider dispatch is disabled by default. The only provider included for automated tests is `MockProvider`.
+TrustGuard is a fail-closed prototype for evaluating AI-initiated payment-order requests. Importing or running `main_public.py` makes no network calls and initializes no PayPal client. A separate PayPal REST Orders v2 adapter is available for the **Sandbox endpoint only**; it is disabled unless `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true` is explicitly set. The project does not contain a live-production endpoint or provider adapter.
 
-## Security status and scope
+## Security and transaction behavior
 
-The repository does not define an authoritative KYAPay grant claim schema or a trusted issuer/key contract. `TrustConfig` therefore requires explicit issuer, audience, trusted public keys, and the names of authenticated grant fields. Do not infer a grant identity from `sub`, `jti`, or a caller-supplied `grant_id`. Until the issuer publishes/configures a compatible signed grant claim contract and keys, authorization must remain unavailable.
+`TrustConfig` requires an explicitly trusted issuer, audience, key set, and configured authenticated grant-field names. The repository does not define the external KYAPay grant contract; the field names must come from its verified issuer contract and are not inferred from `sub`, `jti`, or a request-supplied `grant_id`. Missing issuer, audience, keys, or grant configuration fails closed.
 
-The backend verifies signed JWT access tokens with a configured key ID and algorithm allowlist, verifies signed DPoP proofs and request binding, checks the DPoP key thumbprint and access-token hash, persists replay identifiers in SQLite, and atomically reserves grant spending. SQLite reservations treat `RESERVED`, dispatch-started, unresolved `UNKNOWN`, and created orders as spent/reserved. No automatic retry is performed for an ambiguous provider outcome.
+The backend verifies signed access JWTs and DPoP proofs, binds DPoP to the access token and request, persists replay identifiers and spend reservations in SQLite, and atomically records `DISPATCH_STARTED` before a provider call. The provider payload is generated only from the canonical transaction object that has passed grant authorization and been reserved. The order request includes the same canonical idempotency key in `PayPal-Request-Id`.
 
-An order-created response is not a captured payment. The implementation represents only an order creation result; it does not capture funds or claim payment success. There is no production PayPal provider adapter enabled by this project. The order payload builder is isolated and testable without making requests.
+The adapter uses OAuth2 Client Credentials and a fixed host of `https://api-m.sandbox.paypal.com`; redirects are disabled and connect/read timeouts are configured. Credentials are read from `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` and are never logged. The adapter exposes Orders v2 create and GET-by-order-ID reconciliation. It does not issue capture requests.
 
-## Requirements and tests
+Local transaction states are `CREATED`, `APPROVED`, `COMPLETED`, `FAILED`, and `UNKNOWN`, along with reservation/dispatch-in-progress states. An order-create response is never treated as a completed payment. `COMPLETED` is only allowed after GET reconciliation confirms a matching order, payee, currency, and amount and provides completed capture records whose amounts total the canonical amount. An ambiguous create timeout is kept `UNKNOWN`; the adapter does not automatically repeat creation. If no order ID was received, the record needs manual/provider-side investigation because GET-by-order-ID cannot locate it. Unknown/reconciliation failures remain unresolved and reserved against grant spend.
 
-Use Python 3.10+ and install dependencies in an isolated environment:
+## Requirements and local tests
+
+Use Python 3.10+ in an isolated environment:
 
 ```bash
 python -m venv .venv
@@ -21,40 +23,58 @@ python -m pip install -r requirements.txt
 pytest -q
 ```
 
-The test suite generates local ephemeral signing keys and uses only temporary SQLite files and a mock provider. It does not require PayPal credentials, access the network, or call PayPal. Running `python main_public.py` only prints a fail-closed status message.
+The tests use fake HTTP sessions/responses, ephemeral local signing keys, temporary SQLite databases, and `MockProvider`. They do not send HTTP requests to PayPal and do not require PayPal credentials. Running `python main_public.py` only prints a fail-closed message.
 
-## Explicit trust configuration
+## Required trust configuration
 
-Before constructing `TrustConfig.from_env()`, provide these settings through a secure environment/configuration mechanism:
+Load these values through a secure environment/configuration service before calling `TrustConfig.from_env()`:
 
 - `TRUSTGUARD_ISSUER`: exact trusted JWT issuer.
 - `TRUSTGUARD_AUDIENCE`: expected audience.
-- `TRUSTGUARD_JWT_PUBLIC_KEYS_JSON`: JSON object mapping trusted `kid` values to public-key PEM strings.
-- `TRUSTGUARD_JWT_ALGORITHMS`: comma-separated allowlist; supported values are `RS256`, `ES256`, or `EdDSA` (default `ES256`).
-- `TRUSTGUARD_GRANT_ID_FIELD`: explicit field name inside the authenticated configured grant claim that identifies the grant.
-- `TRUSTGUARD_GRANT_LIMIT_FIELD`: explicit grant field containing the maximum spend in integer minor units.
-- `TRUSTGUARD_GRANT_CURRENCY_FIELD`: explicit grant currency field.
-- `TRUSTGUARD_GRANT_PAYEES_FIELD`: explicit grant field containing the authorized payee identifiers as a list.
+- `TRUSTGUARD_JWT_PUBLIC_KEYS_JSON`: JSON object mapping trusted JWT `kid` values to public-key PEM strings.
+- `TRUSTGUARD_JWT_ALGORITHMS`: comma-separated allowlist (`RS256`, `ES256`, or `EdDSA`; default `ES256`).
+- `TRUSTGUARD_GRANT_ID_FIELD`: authenticated grant field containing its canonical identity.
+- `TRUSTGUARD_GRANT_LIMIT_FIELD`: authenticated maximum spend in integer minor units.
+- `TRUSTGUARD_GRANT_CURRENCY_FIELD`: authenticated currency field.
+- `TRUSTGUARD_GRANT_PAYEES_FIELD`: authenticated list of allowed payee identifiers.
 
-The default authenticated grant claim name is `delegation_grant`; a different contract requires configuring `token_grant_claim` explicitly in trusted application code. These names are configuration inputs, not assertions that the external KYAPay contract uses them. Missing trust or grant-field configuration fails closed. Amounts are parsed as `Decimal`; supported currencies are configured in `TrustConfig` and default to USD only.
+The default grant claim name is `delegation_grant`. A different issuer contract requires explicit configuration in trusted application code. These names and semantics must be confirmed against the issuer contract; the project does not assert that KYAPay uses them. Supported transaction currency defaults to USD.
 
-The SQLite database path must be managed as durable application data and protected with appropriate filesystem permissions, backup, and operational recovery. For production use, additional operational controls such as key rotation, migrations, monitoring, and reconciliation are required.
+## Enabling the Sandbox adapter
 
-## Important limitations before a real integration
+The Sandbox adapter requires the trust configuration above, both PayPal Sandbox credentials, and an explicit opt-in:
 
-- No actual PayPal provider integration or provider reconciliation is enabled. Do not turn on dispatch until a reviewed adapter, idempotency semantics, and UNKNOWN reconciliation procedure exist.
-- The authenticated grant claim field names and semantics must be supplied from the issuer's verified contract; they are deliberately not guessed here.
-- Authorization field values, including integer minor-unit maximum spend and payee identifiers, must match the issuer contract exactly.
-- The example public dashboard is static demo UI, not a live backend or transaction evidence source. It labels controls as unverified by the demo and never represents sample values as verified PayPal success.
-- The previous synthetic transaction references and “100% security” statistics have been removed.
+- `PAYPAL_CLIENT_ID`
+- `PAYPAL_CLIENT_SECRET`
+- `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true`
 
-## Dashboard
+The adapter can be initialized in trusted application code as follows:
 
-Open `dashboard_v2.html` using a local static file server if required by the browser. It labels itself **DEMO / SIMULATED**, does not claim security controls are operational, distinguishes `UNKNOWN`, and renders data via DOM text nodes rather than HTML interpolation. `hasil.json` contains no fabricated successful order or transaction statistics.
+```python
+trust = TrustConfig.from_env()
+ledger = Ledger("/secure/durable/path/trustguard.sqlite")
+provider = PayPalRestOrdersProvider.from_env(trust)
+guard = TrustGuard(trust, ledger, provider)
+```
 
-## Repository files
+The environment switch is checked during initialization and again before provider requests. Do not set it in CI or local tests; all automated HTTP behavior is mocked. Keep the database path private and durable. SQLite files are created owner-only, but deployments must also protect the containing directory, backups, and host.
 
-- `trustguard.py`: signed-token and DPoP verification, canonical transaction, SQLite ledger/state machine, payload builder, and mock-only dispatch boundary.
-- `main_public.py`: harmless fail-closed entry point; no import-time provider setup.
-- `tests/test_trustguard.py`: local security and persistence tests.
-- `dashboard_v2.html`, `hasil.json`: explicitly simulated static dashboard.
+Use `guard.reconcile(local_transaction_id)` to GET a previously recorded PayPal order and reconcile its state. Reconciliation does not create or redispatch orders. An `UNKNOWN` record without a PayPal order ID cannot be reconciled through GET-by-ID and must remain unresolved pending manual investigation.
+
+## Remaining integration limitations
+
+- Configure the actual KYAPay issuer/key/grant contract before accepting requests; this repository intentionally does not invent it.
+- The adapter is Sandbox-only and uses the test endpoint. It must not be adapted to production without a separate review and explicit production-safety design.
+- The code does not expose an HTTP server, application authentication boundary, job runner, or PayPal webhook consumer. Integrators must ensure that only trusted application code can construct canonical transactions and invoke dispatch/reconciliation.
+- No automatic retry is allowed for `UNKNOWN`. Provider-side investigation may still be needed when the original response did not include an order ID.
+- Order creation does not capture funds. Only a matching completed capture in the authenticated PayPal GET response can establish `COMPLETED` in the local state machine.
+- The static dashboard is demo-only and not a live backend evidence source; it makes no claims that the controls are operational.
+
+## Dashboard and files
+
+`dashboard_v2.html` and `hasil.json` are explicitly simulated UI content, not PayPal transaction evidence. Untrusted JSON values are rendered using DOM text nodes.
+
+- `trustguard.py`: token/DPoP verification, canonical transaction, durable ledger, dispatch state machine, and mock provider.
+- `paypal_rest.py`: Sandbox-only PayPal Orders v2 OAuth/REST adapter and GET reconciliation.
+- `main_public.py`: safe fail-closed entry point.
+- `tests/`: local security, ledger, provider HTTP-mock, and reconciliation tests.
