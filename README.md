@@ -1,73 +1,100 @@
-# PayPal AI Trust Engine — TrustGuard prototype
+# TrustGuard Skyfire Seller Service backend
 
-TrustGuard is a fail-closed prototype for authorization checks around AI-initiated payment orders. Importing or running `main_public.py` makes no network calls and initializes no PayPal client. A REST Orders v2 adapter exists for the **PayPal Sandbox endpoint only**. Provider use remains disabled unless `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true` is explicitly set; this project contains no live-production endpoint.
+This repository now includes a minimal FastAPI backend that validates Skyfire KYAPay JWTs. Token validation is not PayPal authorization: the API does not initialize the PayPal adapter, create a PayPal order, capture funds, or report PayPal payment success. Keep `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX` unset or `false` for local work. No production PayPal endpoint is implemented.
 
-## Transaction and ledger safety
+The API accepts the requested `skyfire-pay-id` header. Skyfire currently documents `kyapay-token` as the preferred header and `skyfire-pay-id` as deprecated; this implementation accepts `skyfire-pay-id` for compatibility with the integration requirement. [Skyfire Seller Services](https://docs.skyfire.xyz/docs/seller-services)
 
-SQLite writes use explicit transactions, `BEGIN IMMEDIATE` for serialized reservations and state changes, a 10-second busy timeout, `synchronous=FULL`, and owner-only database-file permissions. Reservations, idempotency identity, state, and provider order ID survive process restarts. The cumulative spend query and insert run inside the same write transaction. Unresolved `UNKNOWN` and in-flight records remain reserved against spending.
+## HTTP endpoints
 
-Before the provider is invoked, the transition to `DISPATCH_STARTED` must commit. A database error aborts the request before the provider call. Once dispatch has started, duplicate invocations do not call create again; `CREATED`, `APPROVED`, `COMPLETED`, `FAILED`, `DISPATCH_STARTED`, and `UNKNOWN` states are not automatically redispatched. Provider timeouts and ambiguous results persist as `UNKNOWN`. `guard.reconcile(local_transaction_id)` performs a provider GET only for a record with a saved PayPal order ID; it never creates or retries an order.
+- `GET /healthz` returns `200` when required environment configuration and the replay database are ready; otherwise it returns `503`.
+- `GET /openapi.json` serves the FastAPI-generated OpenAPI document, including the `skyfire-pay-id` request header.
+- `POST /v1/agent/authorize` validates the token, atomically records its `jti` for replay prevention, and returns a minimal claim projection. Invalid, missing, or previously used tokens receive a generic `401`; replay-store failures receive `503`.
 
-The adapter builds the Orders v2 body solely from the authorized canonical transaction and sends its idempotency key as `PayPal-Request-Id`. An order creation response is not payment completion. Only a GET response with matching order, reference, payee, amount, currency, and completed capture records totaling the authorized amount can transition the ledger to `COMPLETED`. No capture endpoint is implemented.
+The authorization response may include `sub`, `aud`, `ssi`, `amt`, and `cur`. It never returns the raw token, `sti`, or `val`. It explicitly says `paypal_payment_status: NOT_STARTED` and `paypal_payment_authorized: false`. No token text or settlement information is logged or stored. The replay database stores the normalized UUID `jti` and expiration, not the JWT.
 
-## Exact environment variables
+`jti` is enforced as single-use by this API. Skyfire documentation notes that some valid tokens may be presented more than once; this service deliberately chooses the stricter replay policy required for this implementation. [Skyfire Common Token Claims](https://docs.skyfire.xyz/docs/common-token-claims)
 
-The following values are read by the current implementation. The issuer and grant-claim values must come from the actual trusted KYAPay/authorization contract. **Do not substitute examples, invent values, or run with guessed trust settings.** If required trust configuration is missing, `TrustConfig.from_env()` fails closed.
+## Environment variables
 
-| Variable | Requirement | Purpose |
-|---|---|---|
-| `TRUSTGUARD_ISSUER` | Required for `TrustConfig.from_env()` | Exact trusted issuer value used to validate JWT `iss`. Obtain from the trusted issuer configuration. |
-| `TRUSTGUARD_AUDIENCE` | Required for `TrustConfig.from_env()` | Expected JWT audience. Obtain from the trusted application/issuer contract. |
-| `TRUSTGUARD_JWT_PUBLIC_KEYS_JSON` | Required for `TrustConfig.from_env()` | JSON object mapping trusted JWT `kid` values to public-key PEM strings. Supply only issuer-verified public keys, never private keys. |
-| `TRUSTGUARD_JWT_ALGORITHMS` | Optional; defaults to `ES256` | Comma-separated JWT algorithm allowlist. Supported by the current code: `RS256`, `ES256`, `EdDSA`. Configure to match the trusted issuer’s actual signing contract. |
-| `TRUSTGUARD_GRANT_ID_FIELD` | Required for `TrustConfig.from_env()` | Field name inside the authenticated grant claim that the issuer defines as the canonical grant identity. |
-| `TRUSTGUARD_GRANT_LIMIT_FIELD` | Required for `TrustConfig.from_env()` | Field name inside the authenticated grant claim for the maximum spending limit, represented in integer minor units (for USD, cents). |
-| `TRUSTGUARD_GRANT_CURRENCY_FIELD` | Required for `TrustConfig.from_env()` | Field name inside the authenticated grant claim for its currency. |
-| `TRUSTGUARD_GRANT_PAYEES_FIELD` | Required for `TrustConfig.from_env()` | Field name inside the authenticated grant claim containing allowed payee identifiers as a list. |
-| `PAYPAL_CLIENT_ID` | Required to construct the PayPal Sandbox adapter | PayPal **Sandbox** application client ID. Load via a local secret manager or protected environment, not source code or shell history. |
-| `PAYPAL_CLIENT_SECRET` | Required to construct the PayPal Sandbox adapter | PayPal **Sandbox** application secret. Treat as confidential and never print, commit, or place in a shared log. |
-| `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX` | Required to enable adapter; must equal `true` | Explicit opt-in gate checked when constructing the adapter and before OAuth/provider requests. Keep `false` for local tests and ordinary development. |
+The API fails closed unless all three required variables are configured:
 
-The grant claim name currently defaults in code to `delegation_grant`; it is not an environment variable. If the issuer uses another claim name, trusted application code must pass that documented value as `token_grant_claim`. The repository does not define KYAPay’s issuer, audience, signing keys, grant claim shape, or field names. Supported currencies are currently configured in `TrustConfig` code and default to `USD`; there is no supported-currencies environment variable.
+- `SKYFIRE_SELLER_AGENT_ACCOUNT_ID`: expected Seller Agent Account ID; must exactly match the token's `aud`.
+- `SKYFIRE_SELLER_SERVICE_ID`: expected Seller Service ID; must exactly match the token's `ssi` claim.
+- `TRUSTGUARD_DATABASE_PATH`: durable file path for SQLite replay prevention. `:memory:` is rejected. In the container image this defaults to `/data/trustguard.sqlite3`; mount persistent storage at `/data`.
 
-## Safe local setup
+The Skyfire verifier pins these settings in code (they are not environment variables): issuer `https://app.skyfire.xyz`, JWKS URL `https://app.skyfire.xyz/.well-known/jwks.json`, algorithm `ES256`, expected `env` value `sandbox`, allowed JWT types `kya+jwt`, `pay+jwt`, and `kya-pay+jwt`, and a 300-second JWKS cache. JWKS requests use HTTPS, a bounded timeout, and redirects are disabled. The key cache is in memory and refreshes when expired or when a `kid` is not found.
 
-1. Use Python 3.10+ in a virtual environment and install the declared dependencies:
+For PAY and KYA-PAY tokens, the verifier checks positive `amt` and `val`, `cur=USD`, an allowed `stp` value (`coin`, `card`, or `bank`), and `sti.verified=true`. It only returns the amount and currency. KYA tokens do not require payment claims. `sub` is treated as the buyer-agent identifier, not as a grant identifier. `jti` is only used for UUID validation and replay prevention. No `grant_id` claim is assumed or created.
 
-   ```bash
-   python -m venv .venv
-   . .venv/bin/activate
-   python -m pip install -r requirements.txt
-   ```
+### Other environment variables in existing code
 
-2. Keep the Sandbox gate disabled. The test suite needs no PayPal credentials or issuer configuration:
+These are not consumed by the new FastAPI Skyfire API, but remain used by the separate legacy `TrustConfig.from_env()` helper in `trustguard.py`:
 
-   ```bash
-   export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
-   pytest -q
-   ```
+- `TRUSTGUARD_ISSUER`: issuer configured for that legacy TrustGuard helper.
+- `TRUSTGUARD_AUDIENCE`: audience for that helper.
+- `TRUSTGUARD_JWT_PUBLIC_KEYS_JSON`: JSON map of `kid` to trusted public PEM.
+- `TRUSTGUARD_JWT_ALGORITHMS`: optional comma-separated JWT allowlist; defaults to `ES256`.
+- `TRUSTGUARD_GRANT_ID_FIELD`: trusted authenticated-grant identity field name.
+- `TRUSTGUARD_GRANT_LIMIT_FIELD`: trusted authenticated-grant spending-limit field name.
+- `TRUSTGUARD_GRANT_CURRENCY_FIELD`: trusted authenticated-grant currency field name.
+- `TRUSTGUARD_GRANT_PAYEES_FIELD`: trusted authenticated-grant payee-list field name.
 
-   All provider HTTP behavior in tests uses fake sessions/responses. Tests must not make network requests.
+Do not set guessed legacy issuer, audience, keys, or grant-field values. The Skyfire API does not consume or invent those KYAPay grant values.
 
-3. For configuration validation only, obtain the issuer, audience, key set, and authenticated grant field names from the actual trusted contract and provide them through a secure local environment/secret manager. Do not fill these settings with guessed or sample trust values. Keep private key material out of the repository; the verifier needs public keys only.
+These optional variables apply only to the separate PayPal Sandbox adapter, not to this API's token validation:
 
-4. If Sandbox credentials are provisioned for a separate, explicitly authorized Sandbox exercise, load them securely into `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`. For this task and ordinary local setup, **do not set** `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true`, do not construct the REST provider, and do not call `authorize_and_dispatch`. The README gives no command that sends a PayPal request. No live credentials or production endpoint are supported.
+- `PAYPAL_CLIENT_ID`: Sandbox app client ID, needed only to construct the separate provider.
+- `PAYPAL_CLIENT_SECRET`: Sandbox app secret, needed only to construct that provider; load from a secure secret store and never print or commit it.
+- `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX`: must be exactly `true` for the separate adapter to issue Sandbox requests. It is unset/disabled by default and set to `false` in the Docker image. The FastAPI endpoints do not use the adapter even if credentials are configured.
 
-5. Provide a durable, private SQLite file path when constructing `Ledger`. Protect its parent directory and backups as well as the owner-only database file. Keep the file on storage with appropriate durability guarantees.
+## Safe local test setup
 
-## Reconciliation and blockers
+Use Python 3.10+ and a virtual environment. No Skyfire or PayPal credentials are needed for tests; the JWT signer, JWKS response, replay database, and HTTP requests in tests are local/fake.
 
-`PayPalRestOrdersProvider` uses OAuth2 Client Credentials, the fixed `https://api-m.sandbox.paypal.com` host, request timeouts, disabled redirects, and `PayPal-Request-Id`. The provider can create orders and GET order details; it has no capture operation.
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
+pytest -q
+```
 
-An `UNKNOWN` transaction with a known PayPal order ID can be reconciled via `guard.reconcile(local_transaction_id)`. If a create request timed out before any order ID was received, the local transaction remains `UNKNOWN` and reserved; GET-by-ID cannot find it, so provider-side/manual investigation is required before any separate recovery action. The application deliberately does not retry.
+Tests use generated local identities, fake JWKS, and temporary SQLite databases; they do not require or read real Skyfire configuration. The app will remain unready until the three required environment variables are supplied from an authorized Skyfire test configuration.
 
-Before any authorized Sandbox integration, the real issuer’s exact JWT issuer, audience, public signing keys, authenticated grant claim, and grant field names must be configured. The code does not invent or infer these values. The repository has no HTTP server, webhook consumer, or production adapter; trusted integration code is responsible for controlling access to authorization, dispatch, and reconciliation functions.
+To run the API locally after configuring real authorized IDs:
 
-## Dashboard and files
+```bash
+uvicorn app:app --host 127.0.0.1 --port 8000 --no-access-log
+```
 
-`dashboard_v2.html` and `hasil.json` are simulated UI data, not a live backend or proof of a PayPal transaction. Untrusted JSON values are rendered as text.
+Then inspect `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/openapi.json`. The API performs a remote JWKS fetch only when a token is verified and the in-memory key cache needs refresh. Do not send real settlement tokens to an untrusted local environment.
 
-- `trustguard.py`: signed-token and DPoP verification, canonical transaction, durable SQLite ledger/state machine, and mock provider.
-- `paypal_rest.py`: Sandbox-only PayPal REST Orders v2 adapter and GET reconciliation.
-- `main_public.py`: harmless fail-closed entry point.
-- `tests/`: security, persistence, dispatch, and mocked provider tests.
+## Container preparation
+
+The repository includes a non-root `Dockerfile`. It sets `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false`, defaults the database file to `/data/trustguard.sqlite3`, and expects persistent storage to be mounted there. Build locally with `docker build -t trustguard-local .`. To run only on the local machine, supply actual authorized Skyfire IDs through the environment and mount a persistent volume:
+
+```bash
+docker run --rm --name trustguard-local \
+  -p 127.0.0.1:8000:8000 \
+  --mount source=trustguard-data,target=/data \
+  -e SKYFIRE_SELLER_AGENT_ACCOUNT_ID="${SKYFIRE_SELLER_AGENT_ACCOUNT_ID:?set actual authorized Seller Agent Account ID}" \
+  -e SKYFIRE_SELLER_SERVICE_ID="${SKYFIRE_SELLER_SERVICE_ID:?set actual authorized Seller Service ID}" \
+  trustguard-local
+```
+
+The image supplies `TRUSTGUARD_DATABASE_PATH=/data/trustguard.sqlite3` and `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false`. No public endpoint is defined here. Put the service behind an HTTPS termination layer before accepting Skyfire tokens. Do not deploy or register a Seller Service until an actual HTTPS URL and actual Seller Agent Account ID/Seller Service ID are provisioned and verified.
+
+## Important configuration blockers
+
+The implementation follows the requested production-host issuer and JWKS constants while requiring `env=sandbox`. Skyfire's current verification guide documents separate production and Sandbox JWKS hosts. Its current common-claims page calls `ssi` optional, while the current Skyfire-authored IETF draft uses the claim name `tsi` for Target Service ID. This API intentionally requires the user-specified `ssi` claim. Confirm the actual Sandbox issuer/JWKS pairing and exact service-ID claim key with Skyfire before accepting Sandbox tokens; do not silently substitute values. [Skyfire Verify and Extract Data](https://docs.skyfire.xyz/docs/verify-and-extract-data-from-tokens) [Skyfire Common Token Claims](https://docs.skyfire.xyz/docs/common-token-claims) [KYAPay Token Draft](https://datatracker.ietf.org/doc/draft-skyfire-oauth-kyapay-token/)
+
+The service has not been deployed. No public URL, Seller Service registration, or production PayPal integration is configured. `kya-pay` payment claims are only a signed Skyfire authorization signal; a separate PayPal checkout approval process would still be required, and this API does not start one.
+
+## Files
+
+- `app.py`: FastAPI routes and sanitized response model.
+- `skyfire_auth.py`: Skyfire ES256/JWKS verification, claim checks, and minimized validated claim projection.
+- `trustguard.py`: existing SQLite ledger, replay prevention, and separate TrustGuard dispatch primitives.
+- `paypal_rest.py`: preserved Sandbox-only PayPal Orders adapter, not called by the HTTP API.
+- `Dockerfile`: non-root, container-ready local deployment configuration.
+- `tests/test_skyfire_api.py`: generated ES256 tokens, fake JWKS, direct ASGI calls, and local SQLite tests.
