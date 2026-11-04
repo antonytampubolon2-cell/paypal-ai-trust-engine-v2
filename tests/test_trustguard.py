@@ -14,6 +14,10 @@ from trustguard import (
     SecurityError, TrustConfig, TrustGuard, build_paypal_order_payload,
     jwk_thumbprint,
 )
+from risk_scoring import (
+    ANOMALY_THRESHOLD, MODEL_VERSION, TRAINING_DATASET_ID,
+    RiskAssessment, SyntheticIsolationForestScorer,
+)
 
 
 ISSUER = "https://issuer.example"
@@ -379,17 +383,168 @@ def test_in_memory_ledger_is_rejected():
 
 
 def test_dashboard_is_demo_labeled_and_safe_rendering():
-    html = Path(__file__).parents[1].joinpath("dashboard_v2.html").read_text()
+    root = Path(__file__).parents[1]
+    html = root.joinpath("dashboard_v2.html").read_text()
     assert "DEMO / SIMULATED" in html
     assert "innerHTML" not in html
     assert "textContent" in html
     assert "UNKNOWN" in html
+    assert "trustguard-isolation-forest-synthetic-v1" in html
+    assert "not production validated" in html
     data = json.loads(Path(__file__).parents[1].joinpath("hasil.json").read_text())
     assert data["transaksi_terakhir"] is None
     assert data["statistik"] is None
+
+    legacy = root.joinpath("dashboard.html").read_text()
+    assert "DEMO / SIMULATED" in legacy
+    assert "AKTIF" not in legacy and "LULUS" not in legacy
+    assert "7R3064957MB0759941" not in legacy
+    assert "No PayPal order IDs or payment outcomes" in legacy
 
 
 def test_entrypoint_has_no_provider_call():
     source = Path(__file__).parents[1].joinpath("main_public.py").read_text()
     assert "PAYPAL_CLIENT_SECRET" not in source
     assert "create_order" not in source
+
+
+def dispatch_for_risk_test(guard, config, signing_key, transaction, suffix):
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    token = access_token(signing_key, cnf={"jkt": jwk_thumbprint(jwk)}, jti=f"risk-token-{suffix}")
+    proof = proof_token(proof_key, jwk, token, jti=f"risk-proof-{suffix}")
+    return guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", transaction)
+
+
+class FixedRiskScorer:
+    model_version = "test-fixed-risk-v1"
+    training_dataset_id = "synthetic-test-fixture-v1"
+
+    def __init__(self, score=0.1, decision="ALLOW", failure=None):
+        self.value, self.decision, self.failure = score, decision, failure
+        self.calls = []
+
+    def score(self, features):
+        self.calls.append(dict(features))
+        if self.failure:
+            raise self.failure
+        return RiskAssessment(self.model_version, self.training_dataset_id, self.value, self.decision)
+
+
+def test_real_low_anomaly_inference_allows_valid_transaction(config, signing_key, tmp_path):
+    provider = MockProvider()
+    ledger = Ledger(tmp_path / "low-risk.sqlite")
+    guard = TrustGuard(config, ledger, provider)
+    result = dispatch_for_risk_test(guard, config, signing_key, tx("low-tx", "low-idem", "10.00"), "low")
+    assert result["status"] == "CREATED"
+    risk = result["risk_assessment"]
+    assert risk["model_version"] == MODEL_VERSION
+    assert risk["training_dataset_id"] == TRAINING_DATASET_ID
+    assert 0.0 <= risk["anomaly_score"] < ANOMALY_THRESHOLD
+    assert risk["decision"] == "ALLOW"
+    assert len(provider.calls) == 1
+
+
+def test_high_anomaly_is_durably_held_without_provider_call(config, signing_key, tmp_path):
+    provider = MockProvider()
+    path = tmp_path / "high-risk.sqlite"
+    ledger = Ledger(path)
+    guard = TrustGuard(config, ledger, provider)
+    result = dispatch_for_risk_test(guard, config, signing_key, tx("high-tx", "high-idem", "95.00"), "high")
+    assert result["status"] == "HOLD"
+    assert result["risk_assessment"]["decision"] == "HOLD"
+    assert result["risk_assessment"]["anomaly_score"] >= ANOMALY_THRESHOLD
+    assert ledger.get("high-tx")["status"] == "HOLD"
+    assert provider.calls == []
+    restarted = Ledger(path).get("high-tx")
+    assert restarted["risk_decision"] == "HOLD"
+    assert restarted["risk_model_version"] == MODEL_VERSION
+    assert restarted["anomaly_score"] == result["risk_assessment"]["anomaly_score"]
+    assert restarted["risk_scored_at"] is not None
+
+
+def test_inconsistent_high_score_allow_decision_fails_closed(config, signing_key, tmp_path):
+    provider = MockProvider()
+    scorer = FixedRiskScorer(score=0.99, decision="ALLOW")
+    ledger = Ledger(tmp_path / "inconsistent-risk.sqlite")
+    guard = TrustGuard(config, ledger, provider, risk_scorer=scorer)
+    result = dispatch_for_risk_test(guard, config, signing_key, tx("inconsistent-tx", "inconsistent-idem", "10.00"), "inconsistent")
+    assert result["status"] == "HOLD"
+    assert ledger.get("inconsistent-tx")["status"] == "HOLD"
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize("risk_scorer", [
+    FixedRiskScorer(failure=RuntimeError("synthetic model failure")),
+    None,
+])
+def test_model_failure_or_unavailable_fails_closed_to_hold(config, signing_key, tmp_path, risk_scorer):
+    provider = MockProvider()
+    ledger = Ledger(tmp_path / f"fail-closed-{id(risk_scorer)}.sqlite")
+    guard = TrustGuard(config, ledger, provider, risk_scorer=risk_scorer)
+    result = dispatch_for_risk_test(guard, config, signing_key, tx("held-tx", "held-idem", "10.00"), f"held-{id(risk_scorer)}")
+    assert result["status"] == "HOLD"
+    assert result["risk_assessment"]["decision"] == "HOLD"
+    assert result["risk_assessment"]["anomaly_score"] is None
+    assert ledger.get("held-tx")["status"] == "HOLD"
+    assert provider.calls == []
+
+
+def test_risk_features_are_ledger_derived_and_cannot_override_authorization(config, signing_key, tmp_path):
+    scorer = FixedRiskScorer()
+    provider = MockProvider()
+    guard = TrustGuard(config, Ledger(tmp_path / "risk-boundary.sqlite"), provider, risk_scorer=scorer)
+    assert "risk_features" not in inspect.signature(TrustGuard.authorize_and_dispatch).parameters
+
+    with pytest.raises(SecurityError):
+        dispatch_for_risk_test(guard, config, signing_key, tx("bad-payee", "bad-payee-idem", "10.00", payee="merchant-evil"), "bad-payee")
+    limited = {"gid": "grant-canonical-42", "limit": 4999, "currency": "USD", "payees": ["merchant-1"]}
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    token = access_token(signing_key, grant=limited, cnf={"jkt": jwk_thumbprint(jwk)}, jti="risk-limit-token")
+    proof = proof_token(proof_key, jwk, token, jti="risk-limit-proof")
+    with pytest.raises(SecurityError, match="spending limit"):
+        guard.authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx("over-limit", "over-limit-idem", "50.00"))
+    assert scorer.calls == []
+
+    first = tx("idem-first", "shared-risk-idem", "10.00")
+    dispatch_for_risk_test(guard, config, signing_key, first, "idem-first")
+    second = tx("idem-second", "shared-risk-idem", "11.00")
+    with pytest.raises(SecurityError, match="idempotency key"):
+        dispatch_for_risk_test(guard, config, signing_key, second, "idem-second")
+    assert len(scorer.calls) == 1
+    assert scorer.calls[0] == {
+        "amount_to_grant_ratio": 0.1,
+        "cumulative_spending_ratio": 0.1,
+        "recent_velocity_ratio": 0.0,
+        "new_payee": 1.0,
+    }
+    assert len(provider.calls) == 1
+
+
+def test_risk_decision_and_model_version_survive_ledger_restart(config, signing_key, tmp_path):
+    path = tmp_path / "risk-restart.sqlite"
+    provider = MockProvider()
+    first = Ledger(path)
+    result = dispatch_for_risk_test(TrustGuard(config, first, provider), config, signing_key, tx("restart-risk", "restart-risk-idem", "10.00"), "restart")
+    restarted = Ledger(path).get("restart-risk")
+    assert restarted["risk_model_version"] == result["risk_assessment"]["model_version"]
+    assert restarted["risk_training_dataset_id"] == TRAINING_DATASET_ID
+    assert restarted["risk_decision"] == "ALLOW"
+    assert restarted["risk_scored_at"] is not None
+    assert restarted["risk_features"]["amount_to_grant_ratio"] == 0.1
+
+
+def test_synthetic_model_is_reproducible_for_same_version_and_features():
+    features = {
+        "amount_to_grant_ratio": 0.1,
+        "cumulative_spending_ratio": 0.1,
+        "recent_velocity_ratio": 0.0,
+        "new_payee": 1.0,
+    }
+    first = SyntheticIsolationForestScorer().score(features)
+    second = SyntheticIsolationForestScorer().score(features)
+    assert first.model_version == second.model_version == MODEL_VERSION
+    assert first.training_dataset_id == second.training_dataset_id == TRAINING_DATASET_ID
+    assert first.anomaly_score == second.anomaly_score
+    assert first.decision == second.decision

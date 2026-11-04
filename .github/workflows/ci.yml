@@ -36,7 +36,7 @@ jobs:
           from pathlib import Path
 
           paths = [
-              Path("app.py"), Path("skyfire_auth.py"),
+              Path("app.py"), Path("skyfire_auth.py"), Path("risk_scoring.py"),
               Path("trustguard.py"), Path("paypal_rest.py"),
               *Path("tests").glob("test_*.py"),
           ]

@@ -21,6 +21,11 @@
 <main>
   <h1>PayPal AI Trust Engine</h1>
   <div class="notice"><strong>DEMO / SIMULATED</strong> — This static dashboard is not connected to a live backend or PayPal. It is not evidence of a real order, payment, or active security control.</div>
+  <section>
+    <h2>ML anomaly screening — backend code, not this dashboard</h2>
+    <p>The separate TrustGuard transaction path runs a scikit-learn IsolationForest (`trustguard-isolation-forest-synthetic-v1`) using a deterministic synthetic baseline dataset (`synthetic-normal-transaction-features-seed-20261104-v1`). Its anomaly score is not a calibrated fraud probability; this model is not production validated. `POST /v1/agent/authorize` only validates Skyfire tokens and does not invoke transaction scoring. This static page runs no model inference.</p>
+    <p>In the TrustGuard path, a high score or scoring/model failure places the already-authorized transaction on durable HOLD before provider dispatch. PayPal dispatch remains disabled by default.</p>
+  </section>
   <div class="grid" id="controls"></div>
   <section><h2>Transaction evidence</h2><div id="transaction" class="muted">No live transaction evidence is connected.</div></section>
   <section><h2>Demo statistics</h2><div id="statistics" class="muted">No verified backend statistics are connected.</div></section>

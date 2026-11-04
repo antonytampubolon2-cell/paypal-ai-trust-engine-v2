@@ -90,48 +90,49 @@
 <div class="container">
   <h1>PayPal AI Trust Engine</h1>
   <p class="subtitle">Sistem Keamanan Berlapis untuk Transaksi Agen AI</p>
+  <div class="orders" style="border-color:#f59e0b;color:#fde68a">
+    <strong>DEMO / SIMULATED</strong> — Halaman statis ini tidak terhubung ke backend, tidak menjalankan kontrol keamanan, dan bukan bukti transaksi PayPal. Semua status dan catatan transaksi contoh di sini harus dianggap simulasi.
+  </div>
 
   <div class="grid">
     <div class="card">
       <h3>KYAPay Token Verifier</h3>
-      <p>Validasi identitas agen AI dengan klaim kriptografis.</p>
-      <span class="status-ok">AKTIF</span>
+      <p>Validasi token tersedia pada backend terpisah; halaman statis ini tidak memverifikasi token.</p>
+      <span class="status-block">NOT RUN BY THIS DEMO</span>
     </div>
     <div class="card">
-      <h3>JTI Anti-Replay Cache</h3>
-      <p>Mencegah penggunaan ulang token yang sama.</p>
-      <span class="status-ok">AKTIF</span>
+      <h3>Transaction Idempotency</h3>
+      <p>Perlindungan ledger backend tidak ditampilkan atau dibuktikan oleh halaman statis ini.</p>
+      <span class="status-block">NOT VERIFIED BY THIS DEMO</span>
     </div>
     <div class="card">
       <h3>DPoP Binding (RFC 9449)</h3>
-      <p>Pengikatan kriptografis token ke private key agen.</p>
-      <span class="status-ok">AKTIF</span>
+      <p>DPoP checks exist in the separate TrustGuard transaction path; this page does not execute them.</p>
+      <span class="status-block">NOT RUN BY THIS DEMO</span>
     </div>
   </div>
 
   <div class="grid">
     <div class="card">
-      <h3>Token Valid</h3>
-      <p>Status: Diterima</p>
-      <span class="status-ok">LULUS</span>
+      <h3>Synthetic ML Anomaly Screening</h3>
+      <p>TrustGuard code uses a local scikit-learn IsolationForest with synthetic training data. Scores are not fraud probabilities and are not production validated. This static page runs no inference.</p>
+      <span class="status-block">NOT RUN BY THIS DEMO</span>
     </div>
     <div class="card">
-      <h3>Replay Attack</h3>
-      <p>Status: Diblokir sebelum menyentuh PayPal</p>
-      <span class="status-block">DITOLAK</span>
+      <h3>Transaction Status</h3>
+      <p>No live backend evidence is connected. No status here represents an accepted or held transaction.</p>
+      <span class="status-block">NO LIVE EVIDENCE</span>
     </div>
     <div class="card">
-      <h3>URL Mismatch (DPoP)</h3>
-      <p>Status: Token dicuri tidak berguna</p>
-      <span class="status-block">DITOLAK</span>
+      <h3>Provider Status</h3>
+      <p>PayPal dispatch is disabled by default. This page does not connect to PayPal and shows no real order or payment result.</p>
+      <span class="status-block">NOT CONNECTED</span>
     </div>
   </div>
 
   <div class="orders">
-    <h3>Bukti Transaksi End-to-End (PayPal Sandbox)</h3>
-    <div class="order-id">Order ID 1: 7R3064957MB0759941</div>
-    <div class="order-id">Order ID 2: 3HD92730V0626752B</div>
-    <div class="order-id">Order ID 3: 8RJ05941XL2772705</div>
+    <h3>Transaction Evidence</h3>
+    <p>No live transaction evidence is connected. No PayPal order IDs or payment outcomes are presented by this demo.</p>
   </div>
 
   <div class="footer">

@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && mkdir -p /data \
     && chown trustguard:trustguard /data
 
-COPY --chown=trustguard:trustguard app.py skyfire_auth.py trustguard.py paypal_rest.py ./
+COPY --chown=trustguard:trustguard app.py skyfire_auth.py trustguard.py paypal_rest.py risk_scoring.py ./
 USER 10001:10001
 VOLUME ["/data"]
 EXPOSE 8000

@@ -2,6 +2,8 @@
 
 This repository includes a FastAPI service for validating Skyfire KYAPay tokens. Token validation is not PayPal authorization: the API does not initialize the PayPal adapter, create an order, capture funds, or report PayPal payment success. Keep `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX` unset or `false`; the HTTP API never invokes the adapter.
 
+**Demo limitation:** no actual Skyfire-issued Sandbox token has been verified by this project, and no PayPal Sandbox order/capture success is claimed or shown. Tests use generated tokens and mock provider responses only. Confirm Skyfire onboarding metadata before accepting real tokens.
+
 The API accepts `skyfire-pay-id` as requested. Skyfire currently documents `kyapay-token` as preferred and `skyfire-pay-id` as deprecated; this service retains the latter for compatibility. [Skyfire Seller Services](https://docs.skyfire.xyz/docs/seller-services)
 
 ## HTTP endpoints
@@ -13,6 +15,16 @@ The API accepts `skyfire-pay-id` as requested. Skyfire currently documents `kyap
 The API does not use `jti` as a request id or one-use replay key. The verifier requires a UUID-format `jti` as the token identifier, but repeated presentation of the same valid token is permitted until its expiration. The API does not persist `jti`, the raw token, or `sti`. A repeated token is not itself a second PayPal operation: actual dispatch de-duplication remains tied to TrustGuard's separate canonical application `transaction_id` and `idempotency_key`, recorded atomically by its SQLite ledger. The `/v1/agent/authorize` endpoint itself initiates no payment operation. The separate legacy TrustGuard DPoP/access-token path retains its own replay checks; it is not used by this Skyfire endpoint.
 
 The response may include `sub`, `aud`, `tsi`, `tdm` (only when configured), `amt`, and `cur`. It never returns the token, `sti`, or `val`; it does not log or persist token contents or settlement information. A Skyfire PAY or KYA-PAY token is only a signed Skyfire token signal and does not authorize a PayPal debit.
+
+## Local ML anomaly screening (not a production fraud detector)
+
+The repository now contains real local scikit-learn inference in `TrustGuard.authorize_and_dispatch` (`trustguard.py`), using `SyntheticIsolationForestScorer` in `risk_scoring.py`. The FastAPI `POST /v1/agent/authorize` route only validates Skyfire claims; it does **not** call this transaction scorer. The static dashboards do not run inference either.
+
+The estimator is `sklearn.ensemble.IsolationForest`, versioned as `trustguard-isolation-forest-synthetic-v1`. Its deterministic configuration is 128 trees, `max_samples=256`, `contamination=0.04`, `random_state=20261104`, and `n_jobs=1`. It is lazily fitted from 768 synthetic routine-like feature rows generated with NumPy seed `20261104`; the documented feature distributions are amount/grant ratio `Beta(2,4) × 0.70`, cumulative utilization `Beta(1.5,3) × 0.82`, recent velocity `Beta(1.2,8)`, and new-payee indicator `Binomial(1,0.25)`. No real customer, merchant, or payment data is used. The declared dependency is pinned to `scikit-learn==1.6.1`.
+
+Immediately after signed access-token and DPoP verification, authenticated grant currency/payee/limit checks, and the durable spending reservation—and before persisting `DISPATCH_STARTED` or calling any provider—the guard derives four features from the canonical transaction and existing ledger: `amount_to_grant_ratio`, `cumulative_spending_ratio`, `recent_velocity_ratio` (prior active transactions in the preceding ten minutes, normalized/capped at five), and `new_payee`. No caller-supplied risk feature is accepted. The model's IsolationForest margin is sigmoid-mapped to a 0–1 **anomaly ranking score**, with `HOLD` at score ≥0.65. This is not a calibrated probability of fraud, and this synthetic model is not validated for production or payment authorization.
+
+The guard can only continue an already-authorized transaction or place it on durable `HOLD`; it cannot alter transaction terms or bypass grant controls. A high score, scoring exception, malformed result, or unavailable model records a HOLD (score may be unavailable/null) and prevents provider invocation. Score, decision, model version, synthetic dataset ID, feature projection, and timestamp are persisted in SQLite. HOLD reservations remain counted against the grant limit; no automatic or administrative release flow is implemented. The local mock remains the default provider; PayPal Sandbox dispatch is still opt-in and disabled by default.
 
 ## Required environment variables
 
@@ -110,7 +122,9 @@ No image is published and no public endpoint or deployment is configured. Use HT
 
 - `app.py`: FastAPI routes and sanitized response model; no PayPal calls.
 - `skyfire_auth.py`: explicit Sandbox ES256/JWKS configuration and draft-03 claim validation.
-- `trustguard.py`: existing SQLite ledger, transaction idempotency, and separate dispatch primitives.
+- `trustguard.py`: SQLite ledger, transaction idempotency, risk-gated authorization, and separate dispatch primitives.
+- `risk_scoring.py`: deterministic synthetic-data IsolationForest scorer; not production validated.
 - `paypal_rest.py`: separate Sandbox-only Orders adapter, not called by the HTTP API.
 - `Dockerfile`, `.dockerignore`: non-root container setup and build-context exclusions.
 - `tests/test_skyfire_api.py`: generated tokens, fake JWKS, claim/config/repeated-token tests, and direct ASGI calls.
+- `tests/test_trustguard.py`: auth/ledger/provider tests and ML allow/HOLD/failure/durability/reproducibility regression tests.
