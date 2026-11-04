@@ -5,7 +5,7 @@ import os
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, parse_qs
 
 import requests
 
@@ -32,7 +32,8 @@ class PayPalRestOrdersProvider:
     """
 
     def __init__(self, trust_config: TrustConfig,
-                 *, session: Any | None = None, timeout: tuple[float, float] = (3.05, 15.0)):
+                 *, session: Any | None = None, timeout: tuple[float, float] = (3.05, 15.0),
+                 return_url: str | None = None, cancel_url: str | None = None):
         if os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() != "true":
             raise ConfigurationError("PayPal Sandbox dispatch requires TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true")
         client_id = os.environ.get("PAYPAL_CLIENT_ID", "")
@@ -49,11 +50,33 @@ class PayPalRestOrdersProvider:
         self._timeout = timeout
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
+        self._callback_urls = None
+        if return_url is not None or cancel_url is not None:
+            if os.environ.get("TRUSTGUARD_LOCAL_SANDBOX_DEMO", "").lower() != "true":
+                raise ConfigurationError("local Sandbox callbacks require explicit local demo mode")
+            for url in (return_url, cancel_url):
+                parsed = urlsplit(url or "")
+                if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+                        or not parsed.port or parsed.username or parsed.password or parsed.fragment):
+                    raise ConfigurationError("Sandbox demo callbacks must bind to literal localhost")
+            self._callback_urls = {"return_url": return_url, "cancel_url": cancel_url}
 
     @staticmethod
     def _ensure_enabled() -> None:
         if os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() != "true":
             raise ConfigurationError("PayPal Sandbox dispatch is disabled")
+
+    @classmethod
+    def _check_transaction_mapping(cls, tx: CanonicalTransaction) -> None:
+        cls._ensure_enabled()
+        merchant = os.environ.get("TRUSTGUARD_PAYPAL_MERCHANT_ID", "").strip()
+        if not merchant or tx.paypal_merchant_id != merchant or tx.payee != merchant:
+            raise ConfigurationError("canonical PayPal merchant must match explicit server configuration")
+        if tx.skyfire_service_id is not None:
+            source = os.environ.get("TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID", "").strip()
+            service = os.environ.get("SKYFIRE_SELLER_SERVICE_ID", "").strip()
+            if not service or source != service or tx.skyfire_service_id != service or merchant == service:
+                raise ConfigurationError("Skyfire service to PayPal merchant mapping is missing or inconsistent")
 
     @classmethod
     def from_env(cls, trust_config: TrustConfig, *, session: Any | None = None,
@@ -107,7 +130,8 @@ class PayPalRestOrdersProvider:
             return False
         payee = unit.get("payee")
         amount = unit.get("amount")
-        if not isinstance(payee, dict) or payee.get("merchant_id") != tx.payee or not isinstance(amount, dict):
+        merchant = tx.paypal_merchant_id or tx.payee
+        if not merchant or not isinstance(payee, dict) or payee.get("merchant_id") != merchant or not isinstance(amount, dict):
             return False
         if amount.get("currency_code") != tx.currency:
             return False
@@ -117,12 +141,35 @@ class PayPalRestOrdersProvider:
             return False
         return returned_amount.is_finite() and returned_amount == tx.amount_decimal
 
+    @staticmethod
+    def _approval_url(body: Mapping[str, Any], order_id: str) -> str | None:
+        links = body.get("links", [])
+        if not isinstance(links, list):
+            raise ProviderAmbiguousError("PayPal approval links were malformed", order_id)
+        selected = [link for link in links if isinstance(link, dict) and link.get("rel") in {"approve", "payer-action"}]
+        if not selected:
+            return None
+        if len(selected) != 1:
+            raise ProviderAmbiguousError("PayPal approval links were ambiguous", order_id)
+        href = selected[0].get("href")
+        if not isinstance(href, str):
+            raise ProviderAmbiguousError("PayPal approval URL was malformed", order_id)
+        p = urlsplit(href)
+        if (p.scheme != "https" or p.netloc != "www.sandbox.paypal.com"
+                or p.path not in {"/checkoutnow", "/webapps/hermes"}
+                or p.fragment or parse_qs(p.query).get("token") != [order_id]):
+            raise ProviderAmbiguousError("PayPal approval URL was not a bound Sandbox URL", order_id)
+        return href
+
     def create_order(self, tx: CanonicalTransaction) -> Mapping[str, Any]:
         """Create exactly one canonical order; ambiguity is surfaced, never retried."""
         if not isinstance(tx, CanonicalTransaction):
             raise ProviderDefinitiveError("a canonical authorized transaction is required")
-        token = self._oauth_token()
+        self._check_transaction_mapping(tx)
         payload = build_paypal_order_payload(tx)
+        if self._callback_urls:
+            payload["payment_source"] = {"paypal": {"experience_context": {**self._callback_urls, "user_action": "PAY_NOW"}}}
+        token = self._oauth_token()
         try:
             response = self._session.post(
                 SANDBOX_BASE_URL + ORDERS_PATH,
@@ -155,8 +202,14 @@ class PayPalRestOrdersProvider:
         if not self._validate_order_binding(tx, body):
             raise ProviderAmbiguousError("PayPal order response did not match the authorized transaction", order_id)
         status = body.get("status")
+        if status == "PAYER_ACTION_REQUIRED":
+            status = "CREATED"
         if status in {"CREATED", "APPROVED"}:
-            return {"id": order_id, "status": status}
+            result = {"id": order_id, "status": status}
+            approval_url = self._approval_url(body, order_id)
+            if approval_url:
+                result["approval_url"] = approval_url
+            return result
         # Even if a create response claims COMPLETED, only GET reconciliation may
         # confirm completed captures and transition the ledger to COMPLETED.
         raise ProviderAmbiguousError("PayPal returned an unexpected create-order state", order_id)
@@ -168,9 +221,13 @@ class PayPalRestOrdersProvider:
         if not isinstance(captures, list) or not captures:
             return False
         total = Decimal("0")
+        identifiers = set()
         for capture in captures:
             if not isinstance(capture, dict) or not isinstance(capture.get("id"), str) or not capture["id"] or capture.get("status") != "COMPLETED":
                 return False
+            if capture["id"] in identifiers:
+                return False
+            identifiers.add(capture["id"])
             amount = capture.get("amount")
             if not isinstance(amount, dict) or amount.get("currency_code") != tx.currency:
                 return False
@@ -187,6 +244,7 @@ class PayPalRestOrdersProvider:
         """Read and reconcile an order; COMPLETED requires exact completed-capture evidence."""
         if not isinstance(tx, CanonicalTransaction) or not isinstance(order_id, str) or not order_id:
             return {"id": order_id, "status": "UNKNOWN"}
+        self._check_transaction_mapping(tx)
         token = self._oauth_token()
         try:
             response = self._session.get(
@@ -206,12 +264,15 @@ class PayPalRestOrdersProvider:
         if not isinstance(body, dict) or body.get("id") != order_id or not self._validate_order_binding(tx, body):
             return {"id": order_id, "status": "UNKNOWN"}
         order_status = body.get("status")
+        if order_status == "PAYER_ACTION_REQUIRED":
+            order_status = "CREATED"
         unit = body["purchase_units"][0]
         if order_status in {"CREATED", "APPROVED"}:
             return {"id": order_id, "status": order_status}
         if order_status == "COMPLETED":
             if self._capture_evidence_matches(tx, unit):
-                return {"id": order_id, "status": "COMPLETED", "verified_capture": True}
+                return {"id": order_id, "status": "COMPLETED", "verified_capture": True,
+                        "capture_ids": [capture["id"] for capture in unit["payments"]["captures"]]}
             return {"id": order_id, "status": "UNKNOWN"}
         if order_status == "VOIDED":
             payments = unit.get("payments") if isinstance(unit, dict) else None
@@ -219,3 +280,42 @@ class PayPalRestOrdersProvider:
             if not any(isinstance(c, dict) and c.get("status") == "COMPLETED" for c in captures):
                 return {"id": order_id, "status": "FAILED"}
         return {"id": order_id, "status": "UNKNOWN"}
+
+    def capture_order(self, tx: CanonicalTransaction, order_id: str, request_id: str) -> Mapping[str, Any]:
+        """Caller must durably mark capture started and verify approval first.
+
+        POST completion alone is not enough: a separately authenticated GET must
+        confirm exact merchant, transaction, currency, total and completed captures.
+        This method never retries POST, even with the same idempotency key.
+        """
+        if (not isinstance(tx, CanonicalTransaction) or not (tx.paypal_merchant_id or tx.payee)
+                or not isinstance(order_id, str) or not order_id
+                or not isinstance(request_id, str) or not request_id):
+            raise ProviderDefinitiveError("canonical order and stable capture request identity are required")
+        self._check_transaction_mapping(tx)
+        token = self._oauth_token()
+        try:
+            response = self._session.post(
+                SANDBOX_BASE_URL + ORDERS_PATH + "/" + quote(order_id, safe="") + "/capture",
+                json={},
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                         "Accept": "application/json", "Prefer": "return=representation",
+                         "PayPal-Request-Id": request_id},
+                timeout=self._timeout, allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise ProviderAmbiguousError("PayPal capture outcome is unknown", order_id) from exc
+        if not 200 <= response.status_code < 300:
+            # Already-captured conflicts and all rejected capture attempts require GET.
+            # Never release reserved spend merely because a capture POST failed.
+            raise ProviderAmbiguousError("PayPal capture needs reconciliation", order_id)
+        try:
+            body = response.json()
+        except (ValueError, AttributeError) as exc:
+            raise ProviderAmbiguousError("PayPal capture response was malformed", order_id) from exc
+        if not isinstance(body, dict) or body.get("id") != order_id or body.get("status") != "COMPLETED":
+            raise ProviderAmbiguousError("PayPal capture was not confirmed", order_id)
+        details = dict(self.get_order_details(tx, order_id))
+        if details.get("status") != "COMPLETED" or details.get("verified_capture") is not True:
+            raise ProviderAmbiguousError("PayPal completed capture evidence was not verified", order_id)
+        return details

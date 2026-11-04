@@ -277,6 +277,18 @@ class Ledger:
                     reason TEXT NOT NULL,
                     reviewed_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS capture_attempts (
+                    transaction_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    started_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS provider_evidence (
+                    evidence_id INTEGER PRIMARY KEY,
+                    transaction_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
+                );
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()[0]
             columns = {row[1] for row in db.execute("PRAGMA table_info(transactions)")}
@@ -485,13 +497,14 @@ class Ledger:
         finally:
             db.close()
 
-    def transition(self, transaction_id: str, new_status: str, provider_order_id: str | None = None) -> None:
+    def transition(self, transaction_id: str, new_status: str, provider_order_id: str | None = None,
+                   *, provider_result: Mapping[str, Any] | None = None, operation: str = "order") -> None:
         allowed = {
             "RESERVED": {"DISPATCH_STARTED", "FAILED", "HOLD", "SCREENED_ALLOW"},
             "HOLD": set(),
             "SCREENED_ALLOW": {"DISPATCH_STARTED"},
             "REVIEW_RELEASED": set(),
-            "DISPATCH_STARTED": {"CREATED", "APPROVED", "FAILED", "UNKNOWN"},
+            "DISPATCH_STARTED": {"CREATED", "APPROVED", "COMPLETED", "FAILED", "UNKNOWN"},
             "CREATED": {"APPROVED", "COMPLETED", "FAILED", "UNKNOWN"},
             "APPROVED": {"COMPLETED", "FAILED", "UNKNOWN"},
             "UNKNOWN": {"CREATED", "APPROVED", "COMPLETED", "FAILED"},
@@ -503,8 +516,64 @@ class Ledger:
             row = db.execute("SELECT status FROM transactions WHERE transaction_id=?", (transaction_id,)).fetchone()
             if not row or new_status not in allowed.get(row[0], set()):
                 raise LedgerError("invalid or missing transaction state transition")
+            if new_status == "COMPLETED":
+                if (not isinstance(provider_result, Mapping)
+                        or provider_result.get("verified_capture") is not True
+                        or provider_result.get("status") != "COMPLETED"
+                        or not provider_order_id or provider_result.get("id") != provider_order_id):
+                    raise LedgerError("COMPLETED requires verified provider capture evidence")
+            if new_status == "COMPLETED" and row[0] == "DISPATCH_STARTED":
+                if not db.execute("SELECT 1 FROM capture_attempts WHERE transaction_id=?", (transaction_id,)).fetchone():
+                    raise LedgerError("order creation cannot imply completed payment")
             db.execute("UPDATE transactions SET status=?,provider_order_id=COALESCE(?,provider_order_id),updated_at=? WHERE transaction_id=?", (new_status, provider_order_id, time.time(), transaction_id))
+            if provider_result is not None:
+                self._insert_provider_evidence(db, transaction_id, operation, provider_result)
             db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def _insert_provider_evidence(db: sqlite3.Connection, transaction_id: str, operation: str, result: Mapping[str, Any]) -> None:
+        # Never persist raw provider bodies, OAuth headers, settlement data or tokens.
+        permitted = {k: result[k] for k in ("id", "status", "verified_capture", "capture_ids", "approval_url") if k in result}
+        db.execute(
+            "INSERT INTO provider_evidence(transaction_id,operation,result_json,recorded_at) VALUES(?,?,?,?)",
+            (transaction_id, operation, json.dumps(permitted, allow_nan=False), time.time()),
+        )
+
+    def record_provider_evidence(self, transaction_id: str, result: Mapping[str, Any], *, operation: str = "reconcile") -> None:
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            self._insert_provider_evidence(db, transaction_id, operation, result)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def begin_capture(self, transaction_id: str, expected_order_id: str) -> str:
+        """One durable capture dispatch per transaction, including after UNKNOWN/restart."""
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT t.status,t.provider_order_id,t.paypal_merchant_id,r.decision FROM transactions t LEFT JOIN risk_assessments r USING(transaction_id) WHERE transaction_id=?",
+                (transaction_id,),
+            ).fetchone()
+            if not row or row[0] != "APPROVED" or row[1] != expected_order_id or not row[2] or row[3] != "ALLOW":
+                raise LedgerError("capture requires approved order, canonical merchant, and durable ML ALLOW")
+            if db.execute("SELECT 1 FROM capture_attempts WHERE transaction_id=?", (transaction_id,)).fetchone():
+                raise LedgerError("capture already started; reconciliation only")
+            request_id = "cap-" + hashlib.sha256((transaction_id + ":" + expected_order_id).encode()).hexdigest()[:32]
+            db.execute("INSERT INTO capture_attempts VALUES(?,?,?)", (transaction_id, request_id, time.time()))
+            db.execute("UPDATE transactions SET status='DISPATCH_STARTED',updated_at=? WHERE transaction_id=? AND status='APPROVED'", (time.time(), transaction_id))
+            db.commit()
+            return request_id
         except Exception:
             db.rollback()
             raise
@@ -518,6 +587,15 @@ class Ledger:
             return None
         record = dict(zip(("transaction_id","grant_id","idempotency_key","amount_minor","currency","payee","skyfire_service_id","paypal_merchant_id","status","provider_order_id","created_at","updated_at","anomaly_score","risk_model_version","risk_training_dataset_id","risk_decision","risk_scored_at","risk_features_json","reviewer_id","review_decision","review_reason","reviewed_at"), row))
         record["risk_features"] = json.loads(record.pop("risk_features_json")) if record["risk_features_json"] is not None else None
+        db = self._connect()
+        try:
+            attempt = db.execute("SELECT request_id,started_at FROM capture_attempts WHERE transaction_id=?", (transaction_id,)).fetchone()
+            record["capture_request_id"] = attempt[0] if attempt else None
+            record["capture_started_at"] = attempt[1] if attempt else None
+            evidence = db.execute("SELECT operation,result_json FROM provider_evidence WHERE transaction_id=? ORDER BY evidence_id", (transaction_id,)).fetchall()
+            record["provider_evidence"] = [{"operation": op, "result": json.loads(data)} for op, data in evidence]
+        finally:
+            db.close()
         return record
 
 
@@ -639,7 +717,10 @@ class MockProvider:
 
 
 def build_paypal_order_payload(tx: CanonicalTransaction) -> dict[str, Any]:
-    return {"intent": "CAPTURE", "purchase_units": [{"reference_id": tx.transaction_id, "payee": {"merchant_id": tx.payee}, "amount": {"currency_code": tx.currency, "value": f"{tx.amount_decimal:.2f}"}}]}
+    merchant = tx.paypal_merchant_id or tx.payee
+    if not merchant or (tx.skyfire_service_id is not None and not tx.paypal_merchant_id):
+        raise SecurityError("PayPal payload requires a separate canonical merchant identity")
+    return {"intent": "CAPTURE", "purchase_units": [{"reference_id": tx.transaction_id, "payee": {"merchant_id": merchant}, "amount": {"currency_code": tx.currency, "value": f"{tx.amount_decimal:.2f}"}}]}
 
 
 class TrustGuard:
@@ -656,6 +737,8 @@ class TrustGuard:
     def authorize_and_dispatch(self, access_token: str, dpop_proof: str, method: str, url: str, tx: CanonicalTransaction) -> dict[str, Any]:
         if self.provider is None:
             raise ConfigurationError("provider is not configured; dispatch is disabled")
+        if not isinstance(self.provider, MockProvider):
+            self.provider._check_transaction_mapping(tx)
         if tx.currency not in self.config.supported_currencies:
             raise SecurityError("unsupported transaction currency")
         claims = self.auth.verify_access_token(access_token)
@@ -707,8 +790,11 @@ class TrustGuard:
         status_code = result.get("status")
         order_id = result.get("id")
         if status_code in {"CREATED", "APPROVED"} and isinstance(order_id, str) and order_id:
-            self.ledger.transition(tx.transaction_id, status_code, order_id)
-            return {"status": status_code, "transaction_id": tx.transaction_id, "provider_order_id": order_id, "payment_completed": False, "risk_assessment": risk_summary}
+            self.ledger.transition(tx.transaction_id, status_code, order_id, provider_result=result, operation="create")
+            outcome = {"status": status_code, "transaction_id": tx.transaction_id, "provider_order_id": order_id, "payment_completed": False, "risk_assessment": risk_summary}
+            if result.get("approval_url"):
+                outcome["approval_url"] = result["approval_url"]
+            return outcome
         # An order-create response alone never constitutes capture evidence.
         self.ledger.transition(tx.transaction_id, "UNKNOWN", order_id if isinstance(order_id, str) else None)
         return {"status": "UNKNOWN", "transaction_id": tx.transaction_id}
@@ -719,20 +805,22 @@ class TrustGuard:
         record = self.ledger.get(transaction_id)
         if not record:
             raise LedgerError("transaction not found")
-        if record["status"] not in {"UNKNOWN", "CREATED", "APPROVED"}:
+        if record["status"] not in {"UNKNOWN", "CREATED", "APPROVED", "COMPLETED", "DISPATCH_STARTED"}:
             raise LedgerError("transaction state is not reconcilable")
+        if record["status"] == "DISPATCH_STARTED" and not record["capture_request_id"]:
+            raise LedgerError("unresolved create dispatch requires manual reconciliation")
         order_id = record["provider_order_id"]
         if not order_id:
             raise LedgerError("no PayPal order ID is recorded; manual reconciliation is required")
-        tx = CanonicalTransaction(transaction_id=record["transaction_id"], idempotency_key=record["idempotency_key"], amount_minor=record["amount_minor"], currency=record["currency"], payee=record["payee"])
+        tx = CanonicalTransaction(transaction_id=record["transaction_id"], idempotency_key=record["idempotency_key"], amount_minor=record["amount_minor"], currency=record["currency"], payee=record["payee"], skyfire_service_id=record["skyfire_service_id"], paypal_merchant_id=record["paypal_merchant_id"])
         try:
             result = self.provider.get_order_details(tx, order_id)
         except Exception:
-            if record["status"] != "UNKNOWN":
+            if record["status"] not in {"UNKNOWN", "COMPLETED"}:
                 self.ledger.transition(transaction_id, "UNKNOWN", order_id)
             return {"status": "UNKNOWN", "transaction_id": transaction_id, "provider_order_id": order_id}
         if not isinstance(result, Mapping):
-            if record["status"] != "UNKNOWN":
+            if record["status"] not in {"UNKNOWN", "COMPLETED"}:
                 self.ledger.transition(transaction_id, "UNKNOWN", order_id)
             return {"status": "UNKNOWN", "transaction_id": transaction_id, "provider_order_id": order_id}
         status = result.get("status")
@@ -742,8 +830,61 @@ class TrustGuard:
             status = "APPROVED"
         if status == "COMPLETED" and result.get("verified_capture") is not True:
             status = "UNKNOWN"
+        if record["status"] == "COMPLETED" and status != "COMPLETED":
+            return {"status": "UNKNOWN", "transaction_id": transaction_id, "provider_order_id": order_id, "payment_completed": False}
         if status == "UNKNOWN" and record["status"] != "UNKNOWN":
-            self.ledger.transition(transaction_id, "UNKNOWN", order_id)
+            self.ledger.transition(transaction_id, "UNKNOWN", order_id, provider_result={"id": order_id, "status": "UNKNOWN"}, operation="reconcile")
         elif status != "UNKNOWN" and status != record["status"]:
-            self.ledger.transition(transaction_id, status, order_id)
-        return {"status": status, "transaction_id": transaction_id, "provider_order_id": order_id, "payment_completed": status == "COMPLETED" and result.get("verified_capture") is True}
+            self.ledger.transition(transaction_id, status, order_id, provider_result=result, operation="reconcile")
+        else:
+            self.ledger.record_provider_evidence(transaction_id, result if status != "UNKNOWN" else {"id": order_id, "status": "UNKNOWN"})
+        return {"status": status, "transaction_id": transaction_id, "provider_order_id": order_id, "payment_completed": status == "COMPLETED" and result.get("verified_capture") is True, "capture_ids": result.get("capture_ids", []) if status == "COMPLETED" else []}
+
+    def capture_approved_order(self, transaction_id: str, *, buyer_approved: bool = False) -> dict[str, Any]:
+        """Explicit local approval plus verified provider APPROVED, never a callback alone.
+
+        No transaction terms are accepted from the caller. Once a capture attempt
+        exists, all future actions are reconciliation-only, even if GET says APPROVED.
+        """
+        if buyer_approved is not True:
+            raise SecurityError("explicit buyer approval completion is required")
+        if self.provider is None or not hasattr(self.provider, "capture_order"):
+            raise ConfigurationError("capture provider is not configured")
+        record = self.ledger.get(transaction_id)
+        if not record or record["status"] not in {"CREATED", "APPROVED", "COMPLETED"} or record["risk_decision"] != "ALLOW":
+            raise SecurityError("checkout requires durable ML ALLOW and a valid order state")
+        if record["status"] == "COMPLETED":
+            verified = [item["result"] for item in record["provider_evidence"]
+                        if item["result"].get("id") == record["provider_order_id"]
+                        and item["result"].get("status") == "COMPLETED"
+                        and item["result"].get("verified_capture") is True]
+            if not verified:
+                raise SecurityError("completed state lacks durable verified capture evidence")
+            return {"status": "COMPLETED", "transaction_id": transaction_id, "payment_completed": True,
+                    "provider_order_id": record["provider_order_id"], "capture_ids": verified[-1].get("capture_ids", [])}
+        if record["capture_request_id"]:
+            raise LedgerError("capture already started; reconciliation only")
+        reconciled = self.reconcile(transaction_id)
+        if reconciled["status"] == "COMPLETED":
+            return reconciled
+        if reconciled["status"] != "APPROVED":
+            raise SecurityError("PayPal has not verified buyer approval")
+        record = self.ledger.get(transaction_id)
+        tx = CanonicalTransaction(
+            record["transaction_id"], record["idempotency_key"], record["amount_minor"], record["currency"],
+            record["payee"], record["skyfire_service_id"], record["paypal_merchant_id"],
+        )
+        request_id = self.ledger.begin_capture(transaction_id, record["provider_order_id"])
+        try:
+            result = self.provider.capture_order(tx, record["provider_order_id"], request_id)
+        except Exception:
+            self.ledger.transition(transaction_id, "UNKNOWN", record["provider_order_id"],
+                                   provider_result={"id": record["provider_order_id"], "status": "UNKNOWN"}, operation="capture")
+            return {"status": "UNKNOWN", "transaction_id": transaction_id, "payment_completed": False}
+        if (not isinstance(result, Mapping) or result.get("id") != record["provider_order_id"]
+                or result.get("status") != "COMPLETED" or result.get("verified_capture") is not True):
+            self.ledger.transition(transaction_id, "UNKNOWN", record["provider_order_id"])
+            return {"status": "UNKNOWN", "transaction_id": transaction_id, "payment_completed": False}
+        self.ledger.transition(transaction_id, "COMPLETED", record["provider_order_id"], provider_result=result, operation="capture")
+        return {"status": "COMPLETED", "transaction_id": transaction_id, "provider_order_id": record["provider_order_id"],
+                "payment_completed": True, "capture_ids": result.get("capture_ids", [])}

@@ -25,6 +25,11 @@ from trustguard import (
 )
 
 
+@pytest.fixture(autouse=True)
+def explicit_test_merchant_mapping(monkeypatch):
+    monkeypatch.setenv("TRUSTGUARD_PAYPAL_MERCHANT_ID", "merchant-1")
+
+
 class FakeResponse:
     def __init__(self, status_code, payload=None, *, json_error=False):
         self.status_code = status_code
@@ -245,7 +250,7 @@ def test_get_reconciliation_requires_exact_completed_capture_evidence(monkeypatc
     )
     api = provider(monkeypatch, session)
     confirmed = api.get_order_details(transaction, "PAYPAL-ORDER-1")
-    assert confirmed == {"id": "PAYPAL-ORDER-1", "status": "COMPLETED", "verified_capture": True}
+    assert confirmed == {"id": "PAYPAL-ORDER-1", "status": "COMPLETED", "verified_capture": True, "capture_ids": ["CAPTURE-1"]}
     assert api.get_order_details(transaction, "PAYPAL-ORDER-1")["status"] == "UNKNOWN"
     assert api.get_order_details(transaction, "PAYPAL-ORDER-1")["status"] == "UNKNOWN"
 
