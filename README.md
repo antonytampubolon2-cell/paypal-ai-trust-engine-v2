@@ -88,7 +88,7 @@ These optional variables apply only to the separate PayPal Sandbox adapter, not 
 
 ## Operator-run LOCAL SANDBOX checkout (not verified Skyfire integration)
 
-`scripts/run_paypal_sandbox_demo.py` is a separate, explicitly opted-in localhost CLI, **not** a new public FastAPI payment endpoint. It can create an actual PayPal Sandbox order, show its provider-returned buyer approval URL, accept the buyer's localhost callback and explicit terminal confirmation, capture, and reconcile. This flow has only been validated with mocked HTTP responses during implementation; no genuine Sandbox order or capture is claimed by this repository.
+`scripts/run_paypal_sandbox_demo.py` is a separate, explicitly opted-in localhost CLI, **not** a new public FastAPI payment endpoint. It can create an actual PayPal Sandbox order, show its provider-returned buyer approval URL, accept manual order-ID completion and explicit terminal confirmation, capture, and reconcile. A callback is not required to complete approval. This flow has only been validated with mocked HTTP responses during implementation; no genuine Sandbox order or capture is claimed by this repository.
 
 Install the existing `requirements.txt`, then securely inject all of these settings on your own local machine (never paste secrets into source, logs, command history, or this README):
 
@@ -98,8 +98,8 @@ Install the existing `requirements.txt`, then securely inject all of these setti
 | `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true` | Separate explicit opt-in for calls only to `https://api-m.sandbox.paypal.com`. |
 | `PAYPAL_CLIENT_ID` | Sandbox application client ID. |
 | `PAYPAL_CLIENT_SECRET` | Sandbox application secret, securely injected. |
-| `SKYFIRE_SELLER_SERVICE_ID` | Operator-confirmed source Seller Service ID; not inferred from a PayPal merchant. |
-| `TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID` | Explicit mapping source; must exactly equal the configured service ID. |
+| `TRUSTGUARD_LOCAL_TEST_SERVICE_ID` | Pre-onboarding synthetic identity; must start with `LOCAL-TEST-ONLY-PAYPAL-` (maximum 128 characters). Never put it in official Skyfire settings. |
+| `TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID` | Explicit mapping source; must exactly equal the chosen synthetic local identity. |
 | `TRUSTGUARD_PAYPAL_MERCHANT_ID` | Operator-confirmed receiving Sandbox merchant account ID; distinct from the service ID. |
 | `TRUSTGUARD_DATABASE_PATH` | Persistent file-backed SQLite ledger retained for ambiguous-outcome reconciliation. |
 
@@ -109,15 +109,26 @@ Then run locally:
 python scripts/run_paypal_sandbox_demo.py
 ```
 
-The CLI binds only to literal `127.0.0.1` on an ephemeral port; do not deploy it, expose it publicly, or port-forward it. The Docker API image does not include the scripts. Missing gates or mapping values fail before contacting PayPal. Generated ES256 access credentials and DPoP proofs stay in memory and are labelled **LOCAL TEST ONLY**; their issuer is the localhost demo origin, not Skyfire. The CLI does not call Skyfire or modify the production Skyfire verifier. Local credentials are not evidence of authentic Skyfire authorization.
+For example, these **non-secret synthetic test settings** need no official Skyfire onboarding:
 
-The canonical demonstration amount is **USD 5.00**, screened by the existing IsolationForest against a synthetic local USD 100.00 grant. The configured service and merchant remain separate persisted fields. HOLD and REVIEW_RELEASED cannot proceed to checkout. Only the actual Sandbox buyer approval URL returned by PayPal, bound to the order ID, is displayed; no order or capture IDs are invented. Open it with a Sandbox Personal account. After approval redirects to the nonce-bound localhost callback, type literal `APPROVE` in the terminal. A callback is only a signal: the guard performs authenticated GET reconciliation and requires PayPal's verified `APPROVED` state before capture.
+```bash
+export TRUSTGUARD_LOCAL_SANDBOX_DEMO=true
+export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true
+export TRUSTGUARD_LOCAL_TEST_SERVICE_ID=LOCAL-TEST-ONLY-PAYPAL-DEMO-SERVICE
+export TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID=LOCAL-TEST-ONLY-PAYPAL-DEMO-SERVICE
+```
+
+Securely inject your actual Sandbox `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, receiving `TRUSTGUARD_PAYPAL_MERCHANT_ID`, and persistent `TRUSTGUARD_DATABASE_PATH` separately. Those values are not invented by the runner. `SKYFIRE_SELLER_SERVICE_ID` is **not required** for synthetic local mode. As a compatibility alternative, omit `TRUSTGUARD_LOCAL_TEST_SERVICE_ID` and supply an actual confirmed `SKYFIRE_SELLER_SERVICE_ID` with matching mapping source. Do not silently substitute a real service ID for a synthetic one; the selected identity is bound into the canonical ledger transaction.
+
+The CLI retains an optional callback listener bound only to literal `127.0.0.1` on an ephemeral port; it never waits for a callback to allow manual approval. No public callback, port forwarding, or listening address other than loopback is needed. Do not deploy or expose it publicly. The Docker API image does not include the scripts. Missing gates or mapping values fail before contacting PayPal. Generated ES256 access credentials and DPoP proofs stay in memory and are labelled **LOCAL TEST ONLY**; their issuer is the localhost demo origin, not Skyfire. Synthetic mapping is rejected unless the local-demo opt-in is true; the adapter additionally requires loopback local authorization configuration. The production Skyfire settings reject the reserved `LOCAL-TEST-ONLY-PAYPAL-` namespace regardless of the demo flag. Official issuer/JWKS discovery and JWT validation are unchanged. Local credentials never become authentic Skyfire authorization, and the Sandbox host cannot be configured to a production payment host.
+
+The canonical demonstration amount is **USD 5.00**, screened by the existing IsolationForest against a synthetic local USD 100.00 grant. The configured service and merchant remain separate persisted fields. HOLD and REVIEW_RELEASED cannot proceed to checkout. Only the actual Sandbox buyer approval URL returned by PayPal, bound to the order ID, is displayed; no order or capture IDs are invented. Open it with a Sandbox Personal account. After approving, copy the PayPal order ID from the returned URL's `token` parameter (or the original displayed order result) into the terminal's **Returned PayPal order ID** prompt. Enter the ID only, not the URL, a JWT, or a credential. The runner requires an exact match with the original persisted order. Then type literal `APPROVE`. Neither entered text nor an optional callback proves approval: authenticated GET must verify the exact bound order is `APPROVED` before the existing durable capture safeguards permit POST. A mismatch stops without capture; no automatic retry occurs.
 
 Creating an order never reports a completed payment. Create dispatch is durable before its POST. Capture has a separate stable `PayPal-Request-Id` and a one-time durable marker committed before its POST; duplicate capture attempts are blocked even after restart. Completed capture requires authenticated GET evidence matching the canonical transaction reference, exact amount/currency, configured merchant, and completed capture IDs. Normalized evidence is persisted atomically with transaction state; raw provider bodies, OAuth tokens and settlement data are not stored. The CLI performs a final GET reconciliation and only reports success from verified evidence.
 
 Any ambiguous create/capture outcome becomes `UNKNOWN` (or remains durably dispatch-started if the database fails after the call). Stop and preserve the ledger; **never rerun the demo as an automatic retry**. This CLI starts a new explicitly authorized demo transaction on each run, not recovery of an earlier one. For an existing order, use the separate `TrustGuard.reconcile(transaction_id)` operation with trusted configuration; an unknown create without a saved order ID requires manual provider investigation. If a capture marker exists, even a later `APPROVED` GET permits reconciliation only, never another capture POST. No public payment or capture endpoint is added.
 
-All repository tests and CI use mocks and run without real provider credentials. The model is trained on synthetic data, not validated for production fraud detection. Real Skyfire onboarding/token metadata and the merchant-to-service mapping still need operator confirmation. PayPal remains disabled by default everywhere outside this explicitly opted-in local operator flow. After your local run, unset both opt-in flags.
+All repository tests and CI use mocks and run without real provider credentials. The model is trained on synthetic data, not validated for production fraud detection. Real Skyfire onboarding/token metadata and any official merchant-to-service mapping still need operator confirmation; the synthetic test mapping deliberately proves neither. PayPal remains disabled by default everywhere outside this explicitly opted-in local operator flow. After your local run, unset both opt-in flags and `TRUSTGUARD_LOCAL_TEST_SERVICE_ID`.
 
 ## Safe local testing and run
 

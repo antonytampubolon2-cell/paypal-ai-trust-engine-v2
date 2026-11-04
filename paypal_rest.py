@@ -42,6 +42,14 @@ class PayPalRestOrdersProvider:
             raise ConfigurationError("PayPal Sandbox credentials are missing")
         if not isinstance(trust_config, TrustConfig) or not trust_config.issuer or not trust_config.audience or not trust_config.trusted_keys or not all((trust_config.grant_id_field, trust_config.grant_limit_field, trust_config.grant_currency_field, trust_config.grant_payees_field)):
             raise ConfigurationError("complete KYAPay issuer, audience, key, and grant configuration is required")
+        if os.environ.get("TRUSTGUARD_LOCAL_TEST_SERVICE_ID", "").strip():
+            local_issuer = urlsplit(trust_config.issuer)
+            if (os.environ.get("TRUSTGUARD_LOCAL_SANDBOX_DEMO", "").lower() != "true"
+                    or local_issuer.scheme != "http" or local_issuer.hostname != "127.0.0.1"
+                    or not local_issuer.port or local_issuer.username or local_issuer.password
+                    or local_issuer.path or local_issuer.query or local_issuer.fragment
+                    or trust_config.audience != "trustguard-local-paypal-sandbox-demo"):
+                raise ConfigurationError("synthetic Sandbox identity requires isolated loopback demo authorization")
         if not isinstance(timeout, tuple) or len(timeout) != 2 or any(not isinstance(x, (int, float)) or x <= 0 for x in timeout):
             raise ConfigurationError("positive connect/read timeouts are required")
         self._client_id = client_id
@@ -75,6 +83,14 @@ class PayPalRestOrdersProvider:
         if tx.skyfire_service_id is not None:
             source = os.environ.get("TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID", "").strip()
             service = os.environ.get("SKYFIRE_SELLER_SERVICE_ID", "").strip()
+            local_service = os.environ.get("TRUSTGUARD_LOCAL_TEST_SERVICE_ID", "").strip()
+            if local_service:
+                if (os.environ.get("TRUSTGUARD_LOCAL_SANDBOX_DEMO", "").lower() != "true"
+                        or not local_service.startswith("LOCAL-TEST-ONLY-PAYPAL-") or len(local_service) > 128):
+                    raise ConfigurationError("synthetic service identity requires isolated LOCAL TEST ONLY mode")
+                service = local_service
+            elif tx.skyfire_service_id.startswith("LOCAL-TEST-ONLY-PAYPAL-"):
+                raise ConfigurationError("synthetic service identity requires explicit local test configuration")
             if not service or source != service or tx.skyfire_service_id != service or merchant == service:
                 raise ConfigurationError("Skyfire service to PayPal merchant mapping is missing or inconsistent")
 

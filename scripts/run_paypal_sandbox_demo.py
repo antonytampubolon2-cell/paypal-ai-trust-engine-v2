@@ -40,7 +40,6 @@ REQUIRED_ENV = (
     "TRUSTGUARD_ENABLE_PAYPAL_SANDBOX",
     "PAYPAL_CLIENT_ID",
     "PAYPAL_CLIENT_SECRET",
-    "SKYFIRE_SELLER_SERVICE_ID",
     "TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID",
     "TRUSTGUARD_PAYPAL_MERCHANT_ID",
     "TRUSTGUARD_DATABASE_PATH",
@@ -147,11 +146,19 @@ def validate_config(env: Mapping[str, str] | None = None) -> SandboxDemoConfig:
     if values["TRUSTGUARD_ENABLE_PAYPAL_SANDBOX"].strip().lower() != "true":
         raise ValueError("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX must be exactly true")
 
-    seller_service_id = values["SKYFIRE_SELLER_SERVICE_ID"].strip()
+    local_service_id = values.get("TRUSTGUARD_LOCAL_TEST_SERVICE_ID", "").strip()
+    if local_service_id:
+        if not local_service_id.startswith("LOCAL-TEST-ONLY-PAYPAL-") or len(local_service_id) > 128:
+            raise ValueError("TRUSTGUARD_LOCAL_TEST_SERVICE_ID must be a LOCAL-TEST-ONLY-PAYPAL-prefixed synthetic identifier")
+        seller_service_id = local_service_id
+    else:
+        seller_service_id = values.get("SKYFIRE_SELLER_SERVICE_ID", "").strip()
+        if not seller_service_id:
+            raise ValueError("configure TRUSTGUARD_LOCAL_TEST_SERVICE_ID or confirmed SKYFIRE_SELLER_SERVICE_ID")
     mapped_service_id = values["TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID"].strip()
     merchant_id = values["TRUSTGUARD_PAYPAL_MERCHANT_ID"].strip()
     if mapped_service_id != seller_service_id:
-        raise ValueError("PayPal mapping must exactly equal SKYFIRE_SELLER_SERVICE_ID")
+        raise ValueError("PayPal mapping must exactly equal the selected service identity")
     if merchant_id == seller_service_id:
         raise ValueError("PayPal merchant ID must differ from the Skyfire service ID")
 
@@ -341,9 +348,12 @@ def run_demo(*, input_fn=input, output_fn=print, error_fn=print) -> int:
             return 3
         state.set_expected_order(order_id)
         output_fn(f"Open this verified PayPal Sandbox approval URL: {approval_url}")
-        output_fn("After the localhost callback arrives, type APPROVE to permit capture; anything else stops safely.")
-        if not state.signal.wait(timeout=600):
-            output_fn("Checkout stopped: no valid localhost callback was received; no capture was attempted.")
+        output_fn("Approve with your Sandbox Personal account, then enter the returned order ID. No callback or port forwarding is required.")
+        supplied_order_id = input_fn("Returned PayPal order ID (not a URL or JWT): ").strip()
+        persisted = ledger.get(transaction_id)
+        if (not persisted or persisted["provider_order_id"] != order_id
+                or not secrets.compare_digest(supplied_order_id.encode(), order_id.encode())):
+            output_fn("Checkout stopped: manual order identity does not match the persisted order; no capture was attempted.")
             return 3
         if input_fn("Type APPROVE to capture: ").strip() != "APPROVE":
             output_fn("Checkout stopped: buyer approval was not entered; no capture was attempted.")

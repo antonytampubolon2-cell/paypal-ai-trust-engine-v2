@@ -45,6 +45,8 @@ class SkyfireSettings:
     def __post_init__(self) -> None:
         if not all((self.issuer, self.jwks_url, self.expected_environment, self.seller_agent_account_id, self.seller_service_id, self.database_path)):
             raise SkyfireTokenError("required Skyfire service configuration is missing")
+        if self.seller_service_id.startswith("LOCAL-TEST-ONLY-PAYPAL-"):
+            raise SkyfireTokenError("synthetic service identities are forbidden in official Skyfire verification")
         if self.database_path == ":memory:":
             raise SkyfireTokenError("a durable TrustGuard ledger path is required")
         if self.expected_environment != EXPECTED_SANDBOX_ENVIRONMENT:
