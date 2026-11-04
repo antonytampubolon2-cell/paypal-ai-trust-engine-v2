@@ -34,6 +34,26 @@ Skyfire `tsi` and PayPal merchant ID are separate identifier namespaces and are 
 
 Administrative review is disabled unless both `TRUSTGUARD_REVIEWER_ID` and `TRUSTGUARD_REVIEWER_CREDENTIAL` are present. Reviewer identity is server-configured; the credential is compared in constant time and never returned or logged. The durable audit records reviewer ID, decision, reason, and timestamp. Only an exact repeat of the same authenticated decision/reason is idempotent; conflicting later reviews are rejected. `UNKNOWN`, `DISPATCH_STARTED`, any non-HOLD state, and any row with a provider order ID cannot be released. Keep the reviewer credential in a secret manager/environment injection, never in source, README examples, or shell history.
 
+## Reproducible offline synthetic model evaluation
+
+After installing `requirements.txt`, run from the repository root:
+
+```bash
+python scripts/evaluate_risk_model.py
+```
+
+This atomically writes `evaluation/synthetic_report.json`. To reproduce the JSON byte-for-byte in the same dependency environment, supply a fixed UTC run timestamp and an output path:
+
+```bash
+python scripts/evaluate_risk_model.py --timestamp 2026-11-04T17:15:00Z --output /tmp/trustguard-synthetic-report.json
+```
+
+The benchmark calls the existing `SyntheticIsolationForestScorer.score` and uses the unchanged **0.65** HOLD threshold. It never imports the authentication/payment pipeline, creates ledger transactions, contacts providers, tunes the threshold, or changes runtime model behavior. Training uses the existing seed `20261104`; independent validation and holdout evaluation use `20261105` and `20261106`. Exact feature-vector fingerprints are checked for overlap across training, validation and evaluation. Validation is reported separately and is not used for fitting, model selection, or threshold selection.
+
+The holdout contains deterministic labeled normal and anomalous scenarios: routine known payee, routine new payee, high grant utilization, elevated velocity, new payee with high utilization, and combined extreme features. **A new payee alone is labeled normal.** Labels come from predefined synthetic scenario definitions, not from model predictions. They are benchmark anomaly labels, not observed fraud labels. The report includes dataset/model IDs, split seeds and fingerprints, sample counts, threshold, timestamp, confusion matrix, precision, recall, F1, false-positive rate, ROC-AUC, average precision, per-scenario results, and per-sample holdout results. Undefined metrics are recorded as JSON `null` with reasons rather than fabricated values.
+
+**All reported metrics are synthetic benchmark results—not real-world fraud detection performance.** Generator labels, class balance and easy extreme patterns can make metrics optimistic or unrepresentative. Separate seeds and row-overlap checks prevent sample leakage, but do not make this benchmark representative of real transactions. The anomaly score is a ranking signal, not a calibrated fraud probability. Real labeled data, independent validation and operational false-positive analysis remain necessary before any production use.
+
 ## Required environment variables
 
 The API fails closed unless these variables are set:
