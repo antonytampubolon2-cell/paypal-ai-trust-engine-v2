@@ -1,0 +1,110 @@
+{
+  "aggregation": "max",
+  "feature_names": [
+    "amount_to_grant_ratio",
+    "cumulative_spending_ratio",
+    "recent_velocity_ratio",
+    "new_payee"
+  ],
+  "feature_representation_id": "trusted-upper-tail-marginals-v2",
+  "features_version": "trusted-risk-features-v1",
+  "fit_data_scope": "training_reference_vectors_only",
+  "fit_seed": 20261104,
+  "forest_fitted_state_fingerprint": "b323ccf05cd587f61bba004e209947600f90d1734538e2758b137eabe91d25f6",
+  "hyperparameters": {
+    "contamination": 0.04,
+    "max_samples": 256,
+    "n_estimators": 128,
+    "n_jobs": 1,
+    "random_state_base": 20261104,
+    "random_states": [
+      20261104,
+      20261105,
+      20261106,
+      20261107
+    ],
+    "sigmoid_scale": 8.0
+  },
+  "labels_used_for_fit": false,
+  "model_version": "trustguard-isolation-forest-synthetic-v2-candidate",
+  "no_labels_passed_to_fit": true,
+  "per_feature_fit_seeds": [
+    20261104,
+    20261105,
+    20261106,
+    20261107
+  ],
+  "quantile": 0.75,
+  "quantile_boundaries": {
+    "amount_to_grant_ratio": 0.32813991684485416,
+    "cumulative_spending_ratio": 0.38903585445149835,
+    "new_payee": 0.0,
+    "recent_velocity_ratio": 0.19552168296647957
+  },
+  "raw_quantile_boundaries": {
+    "amount_to_grant_ratio": 0.32813991684485416,
+    "cumulative_spending_ratio": 0.38903585445149835,
+    "new_payee": 1.0,
+    "recent_velocity_ratio": 0.19552168296647957
+  },
+  "representation": {
+    "binary_features_preserved_raw": [
+      "new_payee"
+    ],
+    "binary_formula": "new_payee_raw_0_or_1",
+    "continuous_features": [
+      "amount_to_grant_ratio",
+      "cumulative_spending_ratio",
+      "recent_velocity_ratio"
+    ],
+    "continuous_formula": "max(0, (x - training_q75) / training_max_minus_q75_or_1)",
+    "kind": "trusted_upper_tail_marginals",
+    "maxima": {
+      "amount_to_grant_ratio": 0.6433993623225107,
+      "cumulative_spending_ratio": 0.7874927805133883,
+      "new_payee": 1.0,
+      "recent_velocity_ratio": 0.5407332327000176
+    },
+    "new_payee_history_preserved": true,
+    "quantile": 0.75,
+    "quantile_boundaries": {
+      "amount_to_grant_ratio": 0.32813991684485416,
+      "cumulative_spending_ratio": 0.38903585445149835,
+      "new_payee": 0.0,
+      "recent_velocity_ratio": 0.19552168296647957
+    },
+    "raw_quantile_boundaries": {
+      "amount_to_grant_ratio": 0.32813991684485416,
+      "cumulative_spending_ratio": 0.38903585445149835,
+      "new_payee": 1.0,
+      "recent_velocity_ratio": 0.19552168296647957
+    },
+    "scales": {
+      "amount_to_grant_ratio": 0.31525944547765655,
+      "cumulative_spending_ratio": 0.39845692606189,
+      "new_payee": 1.0,
+      "recent_velocity_ratio": 0.34521154973353807
+    },
+    "upper_cap": null
+  },
+  "runtime_versions": {
+    "numpy": "2.5.4",
+    "python": "3.12.3",
+    "sklearn": "1.6.1"
+  },
+  "scales": {
+    "amount_to_grant_ratio": 0.31525944547765655,
+    "cumulative_spending_ratio": 0.39845692606189,
+    "new_payee": 1.0,
+    "recent_velocity_ratio": 0.34521154973353807
+  },
+  "score_transform": "sigmoid(-decision_function * 8)",
+  "training_dataset_id": "synthetic-normal-transaction-features-seed-20261104-v1",
+  "training_fingerprint": "14da05f74ca491dfaf8b42524f9e5178227579acefee663ec4aee39f081cf81f",
+  "training_matrix_sha256": "14da05f74ca491dfaf8b42524f9e5178227579acefee663ec4aee39f081cf81f",
+  "training_row_count": 768,
+  "training_rows": 768,
+  "training_seed": 20261104,
+  "validation_or_evaluation_used_for_fit": false,
+  "version": "trustguard-isolation-forest-synthetic-v2-candidate"
+}

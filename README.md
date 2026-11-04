@@ -70,6 +70,22 @@ Selection is frozen before accessing the locked holdout (`20261106`). Its featur
 
 **Production remains at 0.65.** These are synthetic benchmark results, not fraud-detection guarantees or calibrated probabilities. The 1% ceiling constrains observed validation FPR, not a statistical upper bound or production FPR. With 80 normal validation examples, one false positive already exceeds 1%, so the default constraint permits zero validation false positives. The holdout was previously inspected for baseline performance; this calibration enforces validation-only selection rather than claiming a previously unseen external validation dataset. Any deployment/policy change would require a separate authorized task and representative labeled-data validation.
 
+### IsolationForest v2 candidate (offline only)
+
+```bash
+python scripts/evaluate_candidate_v2.py --max-validation-fpr 0.01
+```
+
+The command writes `evaluation/synthetic_v2_candidate_report.json` and `evaluation/synthetic_v2_candidate_metadata.json`. `--output`, `--metadata-output` and `--timestamp` support alternate paths and fixed-time reproducibility. No credentials or real transactions are involved.
+
+The fixed candidate design is `trustguard-isolation-forest-synthetic-v2-candidate`, representation `trusted-upper-tail-marginals-v2`. It learns upper-tail offsets/scales from the existing training rows only for amount/grant ratio, cumulative utilization and velocity, preserves the trusted binary new-payee signal, and fits four independent one-feature IsolationForests. Its maximum marginal anomaly ranking lets an isolated signal contribute without dilution by otherwise routine features. The representation and forest parameters are fixed before validation; no validation or holdout labels are passed to fitting. This is a genuine sklearn inference ensemble, not a deterministic fraud rule or a calibrated probability.
+
+Validation seed `20261105` compares production v1 at 0.65, validation-calibrated v1, and the candidate. The predeclared selection gate requires observed validation FPR at most 1%, better overall recall, and better isolated utilization and velocity recall than calibrated v1. Eighty normal validation samples mean one false positive already exceeds 1%. A failing candidate is rejected explicitly; production is never switched to it.
+
+The candidate model metadata and validation-selected threshold are frozen before fresh holdout seed `20261107` is generated/scored. The previously disclosed `20261106` split is not used for v2 fitting, selection, or tuning. All comparisons on the fresh holdout reuse cached per-model scores, with overall and scenario-level confusion matrices, precision, recall, F1, FPR, ROC-AUC and average precision. Independent split fingerprints and the frozen candidate fingerprint are recorded. Repeated deterministic test runs verify reproducibility; they do not initiate further tuning from holdout results.
+
+**These are synthetic benchmark results, not real-world fraud-detection guarantees.** Validation has already informed previous work, so results still require genuinely independent representative data and a separate authorized review before any production integration. Production remains the existing v1 scorer at threshold **0.65**, with all authentication, reservation, reviewer and payment safeguards unchanged.
+
 ## Required environment variables
 
 The API fails closed unless these variables are set:

@@ -42,6 +42,8 @@ jobs:
               Path("scripts/run_paypal_sandbox_demo.py"),
               Path("risk_evaluation.py"), Path("scripts/evaluate_risk_model.py"),
               Path("risk_calibration.py"), Path("scripts/calibrate_risk_threshold.py"),
+              Path("risk_candidate_v2.py"), Path("risk_candidate_evaluation.py"),
+              Path("scripts/evaluate_candidate_v2.py"),
               *Path("tests").glob("test_*.py"),
           ]
           for path in paths:
@@ -60,6 +62,9 @@ jobs:
 
       - name: Run validation-only synthetic calibration (candidate not active)
         run: python scripts/calibrate_risk_threshold.py --output /tmp/trustguard-calibration-report.json
+
+      - name: Evaluate offline v2 candidate on fresh synthetic holdout (not active)
+        run: python scripts/evaluate_candidate_v2.py --output /tmp/trustguard-v2-report.json --metadata-output /tmp/trustguard-v2-metadata.json
 
       - name: Build container locally (no registry push)
         run: docker build --tag trustguard-ci:${GITHUB_SHA} .
