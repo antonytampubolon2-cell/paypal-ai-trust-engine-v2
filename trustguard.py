@@ -246,7 +246,7 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS transactions (
                     transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
                     amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('RESERVED','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
+                    status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
                     provider_order_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS tx_grant_status ON transactions(grant_id, status);
@@ -262,14 +262,14 @@ class Ledger:
                 );
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()[0]
-            if "'HOLD'" not in schema:
+            if "'SCREENED_ALLOW'" not in schema:
                 try:
                     db.executescript("""
                     BEGIN IMMEDIATE;
                     CREATE TABLE transactions_new (
                         transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
                         amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT NOT NULL,
-                        status TEXT NOT NULL CHECK(status IN ('RESERVED','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
+                        status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
                         provider_order_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
                     );
                     INSERT INTO transactions_new SELECT transaction_id,grant_id,idempotency_key,amount_minor,currency,payee,
@@ -329,7 +329,7 @@ class Ledger:
                 raise SecurityError("transaction identity already exists")
             if tx.currency != grant_currency:
                 raise SecurityError("transaction currency does not match grant")
-            used = db.execute("SELECT COALESCE(SUM(amount_minor),0) FROM transactions WHERE grant_id=? AND currency=? AND status IN ('RESERVED','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','UNKNOWN')", (grant_id, tx.currency)).fetchone()[0]
+            used = db.execute("SELECT COALESCE(SUM(amount_minor),0) FROM transactions WHERE grant_id=? AND currency=? AND status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','UNKNOWN')", (grant_id, tx.currency)).fetchone()[0]
             if used + tx.amount_minor > max_spend_minor:
                 raise SecurityError("cumulative grant spending limit exceeded")
             now = time.time()
@@ -347,7 +347,7 @@ class Ledger:
         if not grant_id or not isinstance(max_spend_minor, int) or isinstance(max_spend_minor, bool) or max_spend_minor <= 0:
             raise SecurityError("invalid authenticated grant authorization")
         now = time.time() if now is None else now
-        active = ("RESERVED", "HOLD", "DISPATCH_STARTED", "CREATED", "APPROVED", "COMPLETED", "UNKNOWN")
+        active = ("RESERVED", "SCREENED_ALLOW", "HOLD", "DISPATCH_STARTED", "CREATED", "APPROVED", "COMPLETED", "UNKNOWN")
         placeholders = ",".join("?" for _ in active)
         db = self._connect()
         try:
@@ -396,10 +396,10 @@ class Ledger:
                 "INSERT INTO risk_assessments(transaction_id,anomaly_score,model_version,training_dataset_id,decision,scored_at,features_json) VALUES(?,?,?,?,?,?,?)",
                 (transaction_id, anomaly_score, model_version, training_dataset_id, decision, scored_at, features_json),
             )
-            if decision == "HOLD":
-                updated = db.execute("UPDATE transactions SET status='HOLD',updated_at=? WHERE transaction_id=? AND status='RESERVED'", (scored_at, transaction_id)).rowcount
-                if updated != 1:
-                    raise LedgerError("could not durably place transaction on hold")
+            outcome_state = "SCREENED_ALLOW" if decision == "ALLOW" else "HOLD"
+            updated = db.execute("UPDATE transactions SET status=?,updated_at=? WHERE transaction_id=? AND status='RESERVED'", (outcome_state, scored_at, transaction_id)).rowcount
+            if updated != 1:
+                raise LedgerError("could not durably persist screened transaction state")
             db.commit()
         except Exception:
             db.rollback()
@@ -409,8 +409,9 @@ class Ledger:
 
     def transition(self, transaction_id: str, new_status: str, provider_order_id: str | None = None) -> None:
         allowed = {
-            "RESERVED": {"DISPATCH_STARTED", "FAILED", "HOLD"},
+            "RESERVED": {"DISPATCH_STARTED", "FAILED", "HOLD", "SCREENED_ALLOW"},
             "HOLD": set(),
+            "SCREENED_ALLOW": {"DISPATCH_STARTED"},
             "DISPATCH_STARTED": {"CREATED", "APPROVED", "FAILED", "UNKNOWN"},
             "CREATED": {"APPROVED", "COMPLETED", "FAILED", "UNKNOWN"},
             "APPROVED": {"COMPLETED", "FAILED", "UNKNOWN"},
@@ -439,6 +440,97 @@ class Ledger:
         record = dict(zip(("transaction_id","grant_id","idempotency_key","amount_minor","currency","payee","status","provider_order_id","created_at","updated_at","anomaly_score","risk_model_version","risk_training_dataset_id","risk_decision","risk_scored_at","risk_features_json"), row))
         record["risk_features"] = json.loads(record.pop("risk_features_json")) if record["risk_features_json"] is not None else None
         return record
+
+
+def assess_reserved_transaction(ledger: Ledger, scorer: Any, grant_id: str, tx: CanonicalTransaction, max_spend_minor: int) -> dict[str, Any]:
+    """Run or retrieve one durable risk assessment for an already-reserved transaction."""
+    record = ledger.get(tx.transaction_id)
+    if not record:
+        raise LedgerError("reserved transaction disappeared before risk assessment")
+    if record["risk_decision"] is None:
+        features = ledger.risk_features(grant_id, tx, max_spend_minor)
+        fallback_version = getattr(scorer, "model_version", "unavailable") if scorer is not None else "unavailable"
+        fallback_dataset = getattr(scorer, "training_dataset_id", "unavailable") if scorer is not None else "unavailable"
+        try:
+            if scorer is None:
+                raise RuntimeError("risk model unavailable")
+            raw = scorer.score(features)
+            version = getattr(raw, "model_version", None)
+            dataset_id = getattr(raw, "training_dataset_id", None)
+            score = getattr(raw, "anomaly_score", None)
+            decision = getattr(raw, "decision", None)
+            if not isinstance(version, str) or not version or not isinstance(dataset_id, str) or not dataset_id:
+                raise ValueError("risk model metadata is invalid")
+            if decision not in {"ALLOW", "HOLD"}:
+                raise ValueError("risk model decision is invalid")
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)) or not 0.0 <= float(score) <= 1.0:
+                raise ValueError("risk model score is invalid")
+            score = float(score)
+            if decision == "ALLOW" and score >= ANOMALY_THRESHOLD:
+                raise ValueError("risk model ALLOW conflicts with configured anomaly threshold")
+        except Exception:
+            # Never disclose model internals or proceed if inference is unavailable.
+            version, dataset_id, score, decision = fallback_version, fallback_dataset, None, "HOLD"
+        try:
+            ledger.record_risk_assessment(
+                tx.transaction_id, anomaly_score=score, model_version=version,
+                training_dataset_id=dataset_id, decision=decision, features=features,
+            )
+        except LedgerError:
+            # A concurrent idempotent request may have durably committed first.
+            latest = ledger.get(tx.transaction_id)
+            if latest is None or latest["risk_decision"] not in {"ALLOW", "HOLD"}:
+                raise
+        record = ledger.get(tx.transaction_id)
+        if not record or record["risk_decision"] not in {"ALLOW", "HOLD"}:
+            raise LedgerError("risk assessment was not durably recorded")
+    return record
+
+
+class RiskScreeningPipeline:
+    """Provider-free API boundary for already authenticated transaction grants."""
+
+    def __init__(self, ledger: Ledger, scorer: Any = _DEFAULT_RISK_SCORER):
+        self.ledger = ledger
+        self.scorer = SyntheticIsolationForestScorer() if scorer is _DEFAULT_RISK_SCORER else scorer
+
+    def screen_authorized_transaction(
+        self, tx: CanonicalTransaction, *, grant_id: str, max_spend_minor: int,
+        grant_currency: str, authorized_payees: tuple[str, ...],
+    ) -> dict[str, Any]:
+        if not grant_id or not isinstance(max_spend_minor, int) or isinstance(max_spend_minor, bool) or max_spend_minor <= 0:
+            raise SecurityError("authenticated transaction authorization is invalid")
+        if tx.currency != grant_currency or tx.payee not in authorized_payees:
+            raise SecurityError("transaction currency or payee is not authorized")
+        if tx.amount_minor > max_spend_minor:
+            raise SecurityError("transaction exceeds authenticated amount limit")
+        state = self.ledger.reserve(grant_id, tx, max_spend_minor, grant_currency)
+        if state not in {"RESERVED", "SCREENED_ALLOW", "HOLD"}:
+            raise SecurityError("transaction already has a non-screening terminal or dispatch state")
+        if state == "HOLD":
+            record = self.ledger.get(tx.transaction_id)
+        else:
+            record = assess_reserved_transaction(self.ledger, self.scorer, grant_id, tx, max_spend_minor)
+        if not record or record["risk_decision"] not in {"ALLOW", "HOLD"}:
+            raise LedgerError("screening result is unavailable")
+        decision = record["risk_decision"]
+        reason_code = (
+            "ANOMALY_BELOW_THRESHOLD" if decision == "ALLOW"
+            else "MODEL_UNAVAILABLE" if record["anomaly_score"] is None
+            else "ANOMALY_THRESHOLD_EXCEEDED"
+        )
+        return {
+            "status": decision,
+            "transaction_id": tx.transaction_id,
+            "transaction_state": record["status"],
+            "reason_code": reason_code,
+            "risk_assessment": {
+                "anomaly_score": record["anomaly_score"],
+                "model_version": record["risk_model_version"],
+                "training_dataset_id": record["risk_training_dataset_id"],
+                "scored_at": record["risk_scored_at"],
+            },
+        }
 
 
 class Provider(Protocol):
@@ -509,43 +601,8 @@ class TrustGuard:
         if status in {"CREATED", "APPROVED", "COMPLETED", "FAILED"}:
             return {"status": status, "transaction_id": tx.transaction_id}
         # Inference runs only after authenticated request binding, grant checks,
-        # and durable spending reservation, and always before dispatch_started.
-        record = self.ledger.get(tx.transaction_id)
-        if not record:
-            raise LedgerError("reserved transaction disappeared before risk assessment")
-        assessment = record if record["risk_decision"] is not None else None
-        if assessment is None:
-            features = self.ledger.risk_features(grant_id, tx, max_spend)
-            fallback_version = getattr(self.risk_scorer, "model_version", "unavailable") if self.risk_scorer is not None else "unavailable"
-            fallback_dataset = getattr(self.risk_scorer, "training_dataset_id", "unavailable") if self.risk_scorer is not None else "unavailable"
-            try:
-                if self.risk_scorer is None:
-                    raise RuntimeError("risk model unavailable")
-                raw = self.risk_scorer.score(features)
-                version = getattr(raw, "model_version", None)
-                dataset_id = getattr(raw, "training_dataset_id", None)
-                score = getattr(raw, "anomaly_score", None)
-                decision = getattr(raw, "decision", None)
-                if not isinstance(version, str) or not version or not isinstance(dataset_id, str) or not dataset_id:
-                    raise ValueError("risk model metadata is invalid")
-                if decision not in {"ALLOW", "HOLD"}:
-                    raise ValueError("risk model decision is invalid")
-                if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)) or not 0.0 <= float(score) <= 1.0:
-                    raise ValueError("risk model score is invalid")
-                score = float(score)
-                if decision == "ALLOW" and score >= ANOMALY_THRESHOLD:
-                    raise ValueError("risk model ALLOW conflicts with configured anomaly threshold")
-            except Exception:
-                # Do not leak model errors or proceed without a valid score.
-                version, dataset_id, score, decision = fallback_version, fallback_dataset, None, "HOLD"
-            self.ledger.record_risk_assessment(
-                tx.transaction_id, anomaly_score=score, model_version=version,
-                training_dataset_id=dataset_id, decision=decision, features=features,
-            )
-            record = self.ledger.get(tx.transaction_id)
-            if not record:
-                raise LedgerError("risk assessment was not durably recorded")
-            assessment = record
+        # and durable spending reservation, and before dispatch_started.
+        assessment = assess_reserved_transaction(self.ledger, self.risk_scorer, grant_id, tx, max_spend)
         risk_summary = {
             "model_version": assessment["risk_model_version"],
             "training_dataset_id": assessment["risk_training_dataset_id"],

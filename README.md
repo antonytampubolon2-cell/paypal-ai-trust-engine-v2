@@ -11,6 +11,7 @@ The API accepts `skyfire-pay-id` as requested. Skyfire currently documents `kyap
 - `GET /healthz`: `200` when the required configuration and durable SQLite ledger are ready; otherwise `503`.
 - `GET /openapi.json`: generated OpenAPI document. It marks `skyfire-pay-id` as a required request header.
 - `POST /v1/agent/authorize`: validates the signed token and returns a minimized claim projection. The response explicitly says `paypal_payment_status: NOT_STARTED` and `paypal_payment_authorized: false`.
+- `POST /v1/agent/screen-transaction`: requires a valid Skyfire PAY/KYA-PAY token, validates a canonical request, durably reserves it against an identity derived from verified token claims, and invokes the existing local IsolationForest scorer. It returns `ALLOW` or `HOLD`, a reason code, and persisted model metadata. This route has no provider dependency and never creates or captures a PayPal order.
 
 The API does not use `jti` as a request id or one-use replay key. The verifier requires a UUID-format `jti` as the token identifier, but repeated presentation of the same valid token is permitted until its expiration. The API does not persist `jti`, the raw token, or `sti`. A repeated token is not itself a second PayPal operation: actual dispatch de-duplication remains tied to TrustGuard's separate canonical application `transaction_id` and `idempotency_key`, recorded atomically by its SQLite ledger. The `/v1/agent/authorize` endpoint itself initiates no payment operation. The separate legacy TrustGuard DPoP/access-token path retains its own replay checks; it is not used by this Skyfire endpoint.
 
@@ -18,13 +19,13 @@ The response may include `sub`, `aud`, `tsi`, `tdm` (only when configured), `amt
 
 ## Local ML anomaly screening (not a production fraud detector)
 
-The repository now contains real local scikit-learn inference in `TrustGuard.authorize_and_dispatch` (`trustguard.py`), using `SyntheticIsolationForestScorer` in `risk_scoring.py`. The FastAPI `POST /v1/agent/authorize` route only validates Skyfire claims; it does **not** call this transaction scorer. The static dashboards do not run inference either.
+The repository now contains real local scikit-learn inference in the `RiskScreeningPipeline` shared with `TrustGuard.authorize_and_dispatch` (`trustguard.py`), using `SyntheticIsolationForestScorer` in `risk_scoring.py`. `POST /v1/agent/screen-transaction` verifies the Skyfire token first and then invokes that provider-free pipeline. `POST /v1/agent/authorize` only validates Skyfire claims; it does **not** call transaction scoring. The static dashboards do not run inference either.
 
 The estimator is `sklearn.ensemble.IsolationForest`, versioned as `trustguard-isolation-forest-synthetic-v1`. Its deterministic configuration is 128 trees, `max_samples=256`, `contamination=0.04`, `random_state=20261104`, and `n_jobs=1`. It is lazily fitted from 768 synthetic routine-like feature rows generated with NumPy seed `20261104`; the documented feature distributions are amount/grant ratio `Beta(2,4) × 0.70`, cumulative utilization `Beta(1.5,3) × 0.82`, recent velocity `Beta(1.2,8)`, and new-payee indicator `Binomial(1,0.25)`. No real customer, merchant, or payment data is used. The declared dependency is pinned to `scikit-learn==1.6.1`.
 
 Immediately after signed access-token and DPoP verification, authenticated grant currency/payee/limit checks, and the durable spending reservation—and before persisting `DISPATCH_STARTED` or calling any provider—the guard derives four features from the canonical transaction and existing ledger: `amount_to_grant_ratio`, `cumulative_spending_ratio`, `recent_velocity_ratio` (prior active transactions in the preceding ten minutes, normalized/capped at five), and `new_payee`. No caller-supplied risk feature is accepted. The model's IsolationForest margin is sigmoid-mapped to a 0–1 **anomaly ranking score**, with `HOLD` at score ≥0.65. This is not a calibrated probability of fraud, and this synthetic model is not validated for production or payment authorization.
 
-The guard can only continue an already-authorized transaction or place it on durable `HOLD`; it cannot alter transaction terms or bypass grant controls. A high score, scoring exception, malformed result, or unavailable model records a HOLD (score may be unavailable/null) and prevents provider invocation. Score, decision, model version, synthetic dataset ID, feature projection, and timestamp are persisted in SQLite. HOLD reservations remain counted against the grant limit; no automatic or administrative release flow is implemented. The local mock remains the default provider; PayPal Sandbox dispatch is still opt-in and disabled by default.
+The screening route binds currency to the signed token, requires `payee` to equal the verified `tsi` (the configured Skyfire Seller Service ID, not a PayPal merchant ID), and treats signed `amt` as the maximum authorized amount. Requests above that cap are rejected; lower amounts remain within the signed ceiling. A deterministic grant-ledger identity is derived from verified issuer, subject, audience, and service ID. The guard can only return `ALLOW` for an already-authorized transaction or place it on durable `HOLD`; it cannot alter transaction terms or bypass grant controls. A high score, scoring exception, malformed result, or unavailable model records a HOLD (score may be unavailable/null) and prevents provider invocation. Score, decision, model version, synthetic dataset ID, feature projection, and timestamp are persisted in SQLite. The screen-only state `SCREENED_ALLOW` is distinct from provider dispatch. HOLD and ALLOW reservations remain counted against cumulative ledger limits; no automatic or administrative HOLD release flow is implemented. The route never constructs a provider and reports `paypal_dispatch: DISABLED_NOT_CALLED`. PayPal Sandbox dispatch remains opt-in and disabled by default elsewhere.
 
 ## Required environment variables
 
@@ -82,6 +83,28 @@ export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
 pytest -q
 ```
 
+### LOCAL TEST ONLY screening demonstration
+
+The safe demo uses only a generated ephemeral signing key/token, a fake in-memory JWKS fetcher, and a temporary local SQLite database. It is **LOCAL TEST ONLY** and is not an authentic Skyfire-issued token. Run the actual HTTP handler through the in-process ASGI test harness and invoke real scikit-learn inference with:
+
+```bash
+pytest -q tests/test_skyfire_api.py -k 'local_test_only'
+```
+
+Those tests demonstrate a low-anomaly `ALLOW`, a high-anomaly `HOLD`, durable scoring evidence, and no provider dispatch. Do not copy test-generated tokens or keys into any environment or treat their result as Skyfire integration evidence.
+
+For an actual configured service, the request contract is:
+
+```http
+POST /v1/agent/screen-transaction
+skyfire-pay-id: <valid, issuer-signed PAY or KYA-PAY token>
+Content-Type: application/json
+
+{"transaction_id":"<unique-local-id>","idempotency_key":"<unique-idempotency-key>","amount":"<positive USD amount not above signed amt>","currency":"USD","payee":"<the exact configured Seller Service ID / signed tsi>"}
+```
+
+Do not use placeholder transaction values as live payment identifiers. An allowed screening is not a PayPal authorization or order; the response always states that PayPal dispatch was not called. This demo has no HTTP route that creates/captures orders.
+
 The GitHub Actions workflow runs on pushes to the remediation branch, pull requests targeting `main`, and manual `workflow_dispatch`. It has `contents: read` permissions, uses Python 3.12 to match the Docker base image, runs syntax validation and all tests, and builds/runs a local container smoke test without publishing an image. Its smoke test uses synthetic non-secret seller identifiers and never requests provider credentials.
 
 To run the API locally, provide the required variables from the authorized Sandbox onboarding/configuration, explicitly keep dispatch disabled, then use:
@@ -120,9 +143,9 @@ No image is published and no public endpoint or deployment is configured. Use HT
 
 ## Files
 
-- `app.py`: FastAPI routes and sanitized response model; no PayPal calls.
+- `app.py`: FastAPI token-validation and provider-free ML screening routes; no PayPal calls.
 - `skyfire_auth.py`: explicit Sandbox ES256/JWKS configuration and draft-03 claim validation.
-- `trustguard.py`: SQLite ledger, transaction idempotency, risk-gated authorization, and separate dispatch primitives.
+- `trustguard.py`: SQLite ledger, transaction idempotency, shared risk-screening pipeline, and separate legacy dispatch primitives.
 - `risk_scoring.py`: deterministic synthetic-data IsolationForest scorer; not production validated.
 - `paypal_rest.py`: separate Sandbox-only Orders adapter, not called by the HTTP API.
 - `Dockerfile`, `.dockerignore`: non-root container setup and build-context exclusions.

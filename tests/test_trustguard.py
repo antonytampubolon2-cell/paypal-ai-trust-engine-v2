@@ -190,7 +190,7 @@ def test_sqlite_dispatch_state_write_failure_blocks_provider(tmp_path, config, s
     with pytest.raises(sqlite3.IntegrityError):
         TrustGuard(config, ledger, provider).authorize_and_dispatch(token, proof, "POST", "https://merchant.example/pay", tx())
     assert provider.calls == []
-    assert Ledger(db_path).get("tx-1")["status"] == "RESERVED"
+    assert Ledger(db_path).get("tx-1")["status"] == "SCREENED_ALLOW"
 
 
 def test_unknown_is_terminal_and_never_redispatched(tmp_path):

@@ -4,6 +4,7 @@ import json
 import os
 import time
 import uuid
+from decimal import Decimal
 
 import jwt
 import pytest
@@ -19,6 +20,7 @@ from skyfire_auth import (
     SkyfireTokenVerifier,
 )
 from trustguard import Ledger
+from risk_scoring import MODEL_VERSION, TRAINING_DATASET_ID
 
 
 SELLER_ID = "seller-agent-test"
@@ -79,7 +81,7 @@ def verifier(settings_, jwk, *, ttl=300, fetcher=None):
     )
 
 
-def asgi_request(app, method, path, *, headers=None):
+def asgi_request(app, method, path, *, headers=None, body=b""):
     """Invoke the ASGI app directly; this harness performs no network I/O."""
     messages = []
     scope = {
@@ -95,7 +97,7 @@ def asgi_request(app, method, path, *, headers=None):
         nonlocal sent_request
         if not sent_request:
             sent_request = True
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": body, "more_body": False}
         return {"type": "http.disconnect"}
 
     async def send(message):
@@ -105,6 +107,34 @@ def asgi_request(app, method, path, *, headers=None):
     start = next(m for m in messages if m["type"] == "http.response.start")
     body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
     return start["status"], dict(start["headers"]), body
+
+
+def local_screening_app(tmp_path, *, amount="50.00", risk_scorer_marker="real"):
+    """LOCAL TEST ONLY: generated signing key/token and fake JWKS, never production credentials."""
+    private, jwk = signing_material()
+    test_settings = settings(tmp_path)
+    signed_verifier = verifier(test_settings, jwk)
+    db_path = tmp_path / "screening.sqlite3"
+    kwargs = {"settings": test_settings, "ledger": Ledger(db_path), "verifier": signed_verifier}
+    if risk_scorer_marker != "real":
+        kwargs["risk_scorer"] = risk_scorer_marker
+    token = make_token(private, overrides={"amt": amount, "val": str(int(Decimal(amount) * 1_000_000))})
+    return create_app(**kwargs), token, db_path
+
+
+def submit_local_screening(app, token, *, transaction_id="screen-tx-1", idempotency_key="screen-idem-1", amount="5.00", currency="USD", payee=SERVICE_ID):
+    body = json.dumps({
+        "transaction_id": transaction_id,
+        "idempotency_key": idempotency_key,
+        "amount": amount,
+        "currency": currency,
+        "payee": payee,
+    }).encode()
+    return asgi_request(
+        app, "POST", "/v1/agent/screen-transaction",
+        headers={"skyfire-pay-id": token, "content-type": "application/json"},
+        body=body,
+    )
 
 
 def test_explicit_documented_sandbox_pair_loads_from_environment(monkeypatch, tmp_path):
@@ -321,3 +351,117 @@ def test_concurrent_repeated_jti_presentations_are_not_request_replays(tmp_path)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         statuses = list(pool.map(submit, range(8)))
     assert statuses == [200] * 8
+
+
+def test_openapi_documents_provider_free_transaction_screening():
+    app = create_app()
+    spec = app.openapi()
+    operation = spec["paths"]["/v1/agent/screen-transaction"]["post"]
+    assert "LOCAL TEST ONLY" in operation["description"]
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("TransactionScreenResponse")
+    assert "PayPal" in spec["info"]["description"]
+
+
+def test_local_test_only_valid_low_risk_request_runs_real_isolation_forest_and_persists(tmp_path):
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token, amount="5.00")
+    result = json.loads(body)
+    assert status == 200
+    assert result["status"] == "ALLOW"
+    assert result["transaction_state"] == "SCREENED_ALLOW"
+    assert result["reason_code"] == "ANOMALY_BELOW_THRESHOLD"
+    assert result["risk_assessment"]["model_version"] == MODEL_VERSION
+    assert result["risk_assessment"]["training_dataset_id"] == TRAINING_DATASET_ID
+    assert result["risk_assessment"]["anomaly_score"] < 0.65
+    from risk_scoring import SyntheticIsolationForestScorer
+    assert isinstance(app.state.screening.scorer, SyntheticIsolationForestScorer)
+
+    restarted = Ledger(db_path).get("screen-tx-1")
+    assert restarted["status"] == "SCREENED_ALLOW"
+    assert restarted["risk_decision"] == "ALLOW"
+    assert restarted["risk_model_version"] == MODEL_VERSION
+    assert restarted["risk_scored_at"] == result["risk_assessment"]["scored_at"]
+    assert restarted["anomaly_score"] == result["risk_assessment"]["anomaly_score"]
+
+
+def test_local_test_only_high_anomaly_returns_hold(tmp_path):
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token, amount="50.00")
+    result = json.loads(body)
+    assert status == 200
+    assert result["status"] == "HOLD"
+    assert result["transaction_state"] == "HOLD"
+    assert result["reason_code"] == "ANOMALY_THRESHOLD_EXCEEDED"
+    assert result["risk_assessment"]["anomaly_score"] >= 0.65
+    assert Ledger(db_path).get("screen-tx-1")["risk_decision"] == "HOLD"
+
+
+def test_screening_rejects_invalid_skyfire_signature(tmp_path):
+    app, _, db_path = local_screening_app(tmp_path)
+    status, _, body = submit_local_screening(app, "not-a-signed-token")
+    assert status == 401
+    assert b"not-a-signed-token" not in body
+    assert Ledger(db_path).get("screen-tx-1") is None
+
+
+@pytest.mark.parametrize("overrides", [
+    {"amount": "50.01"},
+    {"payee": "unbound-payee"},
+    {"currency": "EUR"},
+])
+def test_screening_rejects_amount_currency_or_payee_mismatch(tmp_path, overrides):
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token, **overrides)
+    assert status == 403
+    assert b"not-a-signed-token" not in body
+    assert Ledger(db_path).get("screen-tx-1") is None
+
+
+def test_screening_model_failure_returns_persisted_hold(tmp_path):
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00", risk_scorer_marker=None)
+    status, _, body = submit_local_screening(app, token)
+    result = json.loads(body)
+    assert status == 200
+    assert result["status"] == "HOLD"
+    assert result["reason_code"] == "MODEL_UNAVAILABLE"
+    assert result["risk_assessment"]["anomaly_score"] is None
+    assert Ledger(db_path).get("screen-tx-1")["status"] == "HOLD"
+
+
+def test_screening_never_invokes_paypal_or_provider_dispatch(tmp_path, monkeypatch):
+    from trustguard import TrustGuard
+    from paypal_rest import PayPalRestOrdersProvider
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("screening must never invoke provider dispatch")
+
+    monkeypatch.setattr(TrustGuard, "authorize_and_dispatch", forbidden)
+    monkeypatch.setattr(PayPalRestOrdersProvider, "create_order", forbidden)
+    app, token, _ = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token)
+    assert status == 200
+    assert json.loads(body)["paypal_dispatch"] == "DISABLED_NOT_CALLED"
+
+
+def test_screening_duplicate_reuses_one_reservation_and_one_assessment(tmp_path):
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    first = submit_local_screening(app, token, transaction_id="duplicate-screen", idempotency_key="duplicate-screen-key", amount="5.00")
+    second = submit_local_screening(app, token, transaction_id="duplicate-screen", idempotency_key="duplicate-screen-key", amount="5.00")
+    assert first[0] == second[0] == 200
+    assert json.loads(first[2])["status"] == json.loads(second[2])["status"] == "ALLOW"
+    conflict = submit_local_screening(app, token, transaction_id="duplicate-screen", idempotency_key="different-key", amount="5.00")
+    assert conflict[0] == 409
+    with Ledger(db_path)._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM transactions WHERE transaction_id='duplicate-screen'").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM risk_assessments WHERE transaction_id='duplicate-screen'").fetchone()[0] == 1
+
+
+def test_screening_fails_closed_without_skyfire_configuration(monkeypatch, tmp_path):
+    for name in (
+        "SKYFIRE_ISSUER", "SKYFIRE_JWKS_URL", "SKYFIRE_EXPECTED_ENVIRONMENT",
+        "SKYFIRE_SELLER_AGENT_ACCOUNT_ID", "SKYFIRE_SELLER_SERVICE_ID", "TRUSTGUARD_DATABASE_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    app = create_app()
+    status, _, _ = submit_local_screening(app, "synthetic-local-token")
+    assert status == 503
