@@ -38,6 +38,7 @@ jobs:
           paths = [
               Path("app.py"), Path("skyfire_auth.py"), Path("risk_scoring.py"),
               Path("trustguard.py"), Path("paypal_rest.py"),
+              Path("scripts/run_local_demo.py"),
               *Path("tests").glob("test_*.py"),
           ]
           for path in paths:
@@ -47,6 +48,9 @@ jobs:
 
       - name: Run full test suite
         run: python -m pytest -q
+
+      - name: Run LOCAL TEST ONLY offline end-to-end demo
+        run: python scripts/run_local_demo.py
 
       - name: Build container locally (no registry push)
         run: docker build --tag trustguard-ci:${GITHUB_SHA} .

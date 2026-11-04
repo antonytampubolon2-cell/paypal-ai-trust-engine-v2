@@ -100,13 +100,31 @@ pytest -q
 
 ### LOCAL TEST ONLY screening demonstration
 
-The safe demo uses only a generated ephemeral signing key/token, a fake in-memory JWKS fetcher, and a temporary local SQLite database. It is **LOCAL TEST ONLY** and is not an authentic Skyfire-issued token. Run the actual HTTP handler through the in-process ASGI test harness and invoke real scikit-learn inference with:
+After installing `requirements.txt`, run the full offline A–E demonstration from the repository root with one command:
 
 ```bash
-pytest -q tests/test_skyfire_api.py -k 'local_test_only'
+python scripts/run_local_demo.py
 ```
 
-Those tests demonstrate a low-anomaly `ALLOW`, a high-anomaly `HOLD`, durable scoring evidence, and no provider dispatch. Do not copy test-generated tokens or keys into any environment or treat their result as Skyfire integration evidence.
+Dependencies are the project's existing PyJWT/cryptography, FastAPI, requests, and scikit-learn (pinned to 1.6.1); the in-process ASGI HTTP test client uses only the Python standard library and requires no httpx or running server. Python 3.12 matches CI and Docker. No provider credentials or environment configuration are required for this runner.
+
+The runner generates an ephemeral ES256 key and clearly synthetic Skyfire-like claims, injects a local public-only mock JWKS into the **unchanged** `SkyfireTokenVerifier`, and uses the actual FastAPI screening/review routes. It creates an isolated application with a temporary SQLite ledger and an ephemeral reviewer credential held only in memory. It clears ambient configuration for the duration of the run, explicitly disables PayPal dispatch, and restores the caller's environment afterwards. Provider spies and outbound-network guards are active throughout. No token, private key, settlement claim, or reviewer credential is printed or saved. The temporary database is removed after reopening it and verifying restart evidence.
+
+Output is JSON with a prominent `LOCAL TEST ONLY` disclaimer, scenario records, HTTP route names, an actual model-inference count, and provider/network counters. Expected scenario results with the current pinned model are:
+
+| Scenario | Transaction | Risk decision | Anomaly score (approximately) | Durable state / evidence |
+| --- | --- | --- | --- | --- |
+| A — low risk | `LOCAL-TEST-ONLY-LOW` | ALLOW | 0.415589 | `SCREENED_ALLOW` |
+| B — high risk | `LOCAL-TEST-ONLY-HIGH` | HOLD | 0.698450 | `HOLD`, `ANOMALY_THRESHOLD_EXCEEDED` |
+| C — review | `LOCAL-TEST-ONLY-HIGH` | remains HOLD | 0.698450 | `REVIEW_RELEASED`, `RELEASE_RESERVATION`; reserved minor units 5000 → 0 |
+| D — durability | both records | unchanged | unchanged | low-screen retry and review retry are idempotent; released-screen retry rejected; two transactions and one audit |
+| E — provider safety | none | no payment authorization | n/a | provider invocations 0; external network attempts 0; `DISABLED_NOT_CALLED` |
+
+Both inferred results report model version `trustguard-isolation-forest-synthetic-v1`; inference count is exactly two (retries reuse persisted assessments). The low/high cases use separate clearly synthetic buyer identities so cumulative limits do not obscure the anomaly comparison. Review only abandons a reservation; it does not overturn the ML HOLD or approve a payment. Missing merchant mapping is truthfully reported as `NOT_CONFIGURED`.
+
+These locally signed tokens are **not genuine Skyfire-issued tokens**. The injected local JWKS trusts their key only inside this isolated test application; no production verifier configuration is changed. The model uses synthetic training data, not validated customer fraud data. No Skyfire or PayPal provider call occurs, no PayPal order IDs are fabricated, and this demonstration does **not** prove real Sandbox integration or payment success. Do not export demo tokens or keys into a production/Sandbox service.
+
+Focused automated demo checks: `pytest -q tests/test_local_demo.py`. Existing route tests remain available with `pytest -q tests/test_skyfire_api.py -k 'local_test_only'`.
 
 For an actual configured service, the request contract is:
 
