@@ -54,6 +54,22 @@ The holdout contains deterministic labeled normal and anomalous scenarios: routi
 
 **All reported metrics are synthetic benchmark results—not real-world fraud detection performance.** Generator labels, class balance and easy extreme patterns can make metrics optimistic or unrepresentative. Separate seeds and row-overlap checks prevent sample leakage, but do not make this benchmark representative of real transactions. The anomaly score is a ranking signal, not a calibrated fraud probability. Real labeled data, independent validation and operational false-positive analysis remain necessary before any production use.
 
+### Validation-only threshold calibration (candidate only)
+
+The separate calibration command uses only the validation split (`20261105`) to select a candidate. It does **not** activate it or change production decisions:
+
+```bash
+python scripts/calibrate_risk_threshold.py --max-validation-fpr 0.01
+```
+
+This writes `evaluation/calibration_report.json`. `--max-validation-fpr` is a fraction (0.01 means 1%); `--output` selects a different report path and `--timestamp` supplies a fixed UTC timestamp for reproducibility in the same dependency environment. No provider credentials are needed.
+
+Candidate thresholds cover the validation scores and their immediate floating-point boundary successors for the unchanged `score >= threshold` HOLD rule. The selector maximizes validation recall subject to the configured empirical FPR ceiling, breaking ties by lower FPR and then higher threshold. Neither training labels nor locked holdout labels enter selection. If no candidate has defined recall/FPR and satisfies the ceiling, the report explicitly records `NO_VALID_CANDIDATE` and a null candidate; it does not fall back to a fabricated or production threshold.
+
+Selection is frozen before accessing the locked holdout (`20261106`). Its feature fingerprint must match the existing benchmark, and each holdout row is scored once per calibration run. Baseline 0.65 and the candidate are compared using those same cached scores; the holdout is never searched for thresholds or used to retune a disappointing result. The report includes the full validation tradeoff table, selected threshold and validation metrics, baseline/candidate holdout metrics, scenario-level comparisons, dataset fingerprints, timestamps and methodology. Ranking ROC-AUC and average precision use the same scores and therefore are unchanged by a threshold change.
+
+**Production remains at 0.65.** These are synthetic benchmark results, not fraud-detection guarantees or calibrated probabilities. The 1% ceiling constrains observed validation FPR, not a statistical upper bound or production FPR. With 80 normal validation examples, one false positive already exceeds 1%, so the default constraint permits zero validation false positives. The holdout was previously inspected for baseline performance; this calibration enforces validation-only selection rather than claiming a previously unseen external validation dataset. Any deployment/policy change would require a separate authorized task and representative labeled-data validation.
+
 ## Required environment variables
 
 The API fails closed unless these variables are set:
