@@ -99,5 +99,50 @@ class SyntheticIsolationForestScorer:
 
 __all__ = [
     "ANOMALY_THRESHOLD", "FEATURE_NAMES", "MODEL_VERSION", "TRAINING_DATASET_ID",
-    "RiskAssessment", "SyntheticIsolationForestScorer",
+    "RiskAssessment", "SyntheticIsolationForestScorer", "EXPLANATION_VERSION", "explain_assessment",
 ]
+
+
+EXPLANATION_VERSION = "trusted-feature-explanation-v1"
+
+
+def explain_assessment(features: Mapping[str, float], decision: str, anomaly_score: float | None) -> dict:
+    """Describe observed trusted feature signals, not causal model attributions.
+
+    The supplied decision is never changed. These fixed rule annotations explain
+    context for the decision; they do not estimate fraud likelihood or SHAP values.
+    """
+    valid = isinstance(features, Mapping) and set(features) == set(FEATURE_NAMES)
+    if valid:
+        valid = all(not isinstance(features[name], bool)
+                    and isinstance(features[name], (int, float))
+                    and math.isfinite(float(features[name]))
+                    and 0.0 <= float(features[name]) <= 1.0 for name in FEATURE_NAMES)
+    reasons = ["ANOMALY_BELOW_THRESHOLD" if decision == "ALLOW" else
+               "MODEL_UNAVAILABLE" if anomaly_score is None else "ANOMALY_THRESHOLD_EXCEEDED"]
+    signals = []
+    if not valid:
+        reasons.append("TRUSTED_FEATURES_MISSING_OR_INVALID")
+    else:
+        rules = (
+            ("amount_to_grant_ratio", 0.70, "HIGH_AMOUNT_TO_GRANT_RATIO", "Transaction amount uses at least 70% of the authenticated grant limit."),
+            ("cumulative_spending_ratio", 0.82, "HIGH_CUMULATIVE_GRANT_UTILIZATION", "Reserved and spent amounts use at least 82% of the authenticated grant limit."),
+            ("recent_velocity_ratio", 0.60, "ELEVATED_RECENT_TRANSACTION_VELOCITY", "The ledger records at least three other active transactions within ten minutes."),
+            ("new_payee", 1.0, "NEW_PAYEE_FOR_GRANT", "No other active transaction for this grant and currency uses this payee."),
+        )
+        for feature, threshold, code, description in rules:
+            value = float(features[feature])
+            if value >= threshold:
+                signals.append({"feature": feature, "value": value, "reason_code": code, "description": description})
+                reasons.append(code)
+        if decision == "HOLD" and anomaly_score is not None and not signals:
+            reasons.append("ANOMALOUS_FEATURE_COMBINATION")
+    if decision == "ALLOW":
+        summary = "Anomaly ranking is below the screening threshold; ALLOW does not prove absence of fraud or authorize payment."
+    elif anomaly_score is None:
+        summary = "Screening could not produce a valid model assessment; fail-closed HOLD remains in effect."
+    else:
+        summary = "Anomaly ranking reached the screening threshold; HOLD requires review. Listed signals describe observed feature context, not proven causes of fraud."
+    return {"version": EXPLANATION_VERSION, "reason_codes": reasons, "summary": summary,
+            "feature_signals": signals,
+            "method": "Deterministic trusted-feature rule annotations; not causal IsolationForest attribution. Synthetic-model anomaly ranking is not a calibrated fraud probability."}

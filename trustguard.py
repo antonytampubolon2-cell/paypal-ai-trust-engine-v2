@@ -24,6 +24,7 @@ from risk_scoring import (
     TRAINING_DATASET_ID,
     RiskAssessment,
     SyntheticIsolationForestScorer,
+    explain_assessment,
 )
 
 _DEFAULT_RISK_SCORER = object()
@@ -321,6 +322,25 @@ class Ledger:
                     if db.in_transaction:
                         db.rollback()
                     raise
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                risk_columns = {row[1] for row in db.execute("PRAGMA table_info(risk_assessments)")}
+                if "explanation_json" not in risk_columns:
+                    db.execute("ALTER TABLE risk_assessments ADD COLUMN explanation_json TEXT")
+                for tx_id, features_json, decision, score in db.execute(
+                    "SELECT transaction_id,features_json,decision,anomaly_score FROM risk_assessments WHERE explanation_json IS NULL"
+                ).fetchall():
+                    try:
+                        saved_features = json.loads(features_json)
+                    except (TypeError, ValueError):
+                        saved_features = {}
+                    explanation = explain_assessment(saved_features, decision, score)
+                    db.execute("UPDATE risk_assessments SET explanation_json=? WHERE transaction_id=?",
+                               (json.dumps(explanation, sort_keys=True, allow_nan=False), tx_id))
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
         finally:
             db.close()
 
@@ -425,6 +445,7 @@ class Ledger:
             features_json = json.dumps(dict(features), sort_keys=True, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise LedgerError("risk features are invalid") from exc
+        explanation_json = json.dumps(explain_assessment(features, decision, anomaly_score), sort_keys=True, allow_nan=False)
         scored_at = time.time() if scored_at is None else scored_at
         db = self._connect()
         try:
@@ -433,8 +454,8 @@ class Ledger:
             if not row or row[0] != "RESERVED":
                 raise LedgerError("risk assessment requires a reserved transaction")
             db.execute(
-                "INSERT INTO risk_assessments(transaction_id,anomaly_score,model_version,training_dataset_id,decision,scored_at,features_json) VALUES(?,?,?,?,?,?,?)",
-                (transaction_id, anomaly_score, model_version, training_dataset_id, decision, scored_at, features_json),
+                "INSERT INTO risk_assessments(transaction_id,anomaly_score,model_version,training_dataset_id,decision,scored_at,features_json,explanation_json) VALUES(?,?,?,?,?,?,?,?)",
+                (transaction_id, anomaly_score, model_version, training_dataset_id, decision, scored_at, features_json, explanation_json),
             )
             outcome_state = "SCREENED_ALLOW" if decision == "ALLOW" else "HOLD"
             updated = db.execute("UPDATE transactions SET status=?,updated_at=? WHERE transaction_id=? AND status='RESERVED'", (outcome_state, scored_at, transaction_id)).rowcount
@@ -589,6 +610,8 @@ class Ledger:
         record["risk_features"] = json.loads(record.pop("risk_features_json")) if record["risk_features_json"] is not None else None
         db = self._connect()
         try:
+            explanation = db.execute("SELECT explanation_json FROM risk_assessments WHERE transaction_id=?", (transaction_id,)).fetchone()
+            record["risk_explanation"] = json.loads(explanation[0]) if explanation and explanation[0] else None
             attempt = db.execute("SELECT request_id,started_at FROM capture_attempts WHERE transaction_id=?", (transaction_id,)).fetchone()
             record["capture_request_id"] = attempt[0] if attempt else None
             record["capture_started_at"] = attempt[1] if attempt else None
@@ -686,6 +709,8 @@ class RiskScreeningPipeline:
                 "model_version": record["risk_model_version"],
                 "training_dataset_id": record["risk_training_dataset_id"],
                 "scored_at": record["risk_scored_at"],
+                "decision": record["risk_decision"],
+                "explanation": record["risk_explanation"],
             },
         }
 
@@ -771,6 +796,7 @@ class TrustGuard:
             "anomaly_score": assessment["anomaly_score"],
             "decision": assessment["risk_decision"],
             "scored_at": assessment["risk_scored_at"],
+            "explanation": assessment["risk_explanation"],
         }
         if assessment["risk_decision"] != "ALLOW":
             return {"status": "HOLD", "transaction_id": tx.transaction_id, "risk_assessment": risk_summary}

@@ -50,11 +50,28 @@ class HoldReviewRequest(BaseModel):
     decision: Literal["KEEP_HOLD", "RELEASE_RESERVATION"]
     reason: StrictStr = Field(min_length=1, max_length=1000)
 
+class RiskFeatureSignal(BaseModel):
+    feature: str
+    value: float
+    reason_code: str
+    description: str
+
+
+class RiskExplanationResponse(BaseModel):
+    version: str
+    reason_codes: list[str]
+    summary: str
+    feature_signals: list[RiskFeatureSignal]
+    method: str
+
+
 class RiskAssessmentResponse(BaseModel):
-    anomaly_score: float | None
+    anomaly_score: float | None = Field(description="Synthetic IsolationForest anomaly ranking signal; not a calibrated fraud probability.")
     model_version: str
     training_dataset_id: str
     scored_at: float
+    decision: Literal["ALLOW", "HOLD"]
+    explanation: RiskExplanationResponse
 
 
 class TransactionScreenResponse(BaseModel):
@@ -277,6 +294,8 @@ def create_app(*, settings: SkyfireSettings | None = None, ledger: Ledger | None
                 model_version=record["risk_model_version"],
                 training_dataset_id=record["risk_training_dataset_id"],
                 scored_at=record["risk_scored_at"],
+                decision=record["risk_decision"],
+                explanation=record["risk_explanation"],
             ),
             paypal_dispatch="DISABLED_NOT_CALLED",
         )

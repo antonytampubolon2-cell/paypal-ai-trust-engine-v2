@@ -26,6 +26,14 @@
     <p>The separate TrustGuard transaction path runs a scikit-learn IsolationForest (`trustguard-isolation-forest-synthetic-v1`) using a deterministic synthetic baseline dataset (`synthetic-normal-transaction-features-seed-20261104-v1`). Its anomaly score is not a calibrated fraud probability; this model is not production validated. `POST /v1/agent/authorize` only validates Skyfire tokens and does not invoke transaction scoring. This static page runs no model inference.</p>
     <p>In the TrustGuard path, a high score or scoring/model failure places the already-authorized transaction on durable HOLD before provider dispatch. PayPal dispatch remains disabled by default.</p>
   </section>
+  <section>
+    <h2>Risk explanation — static visualization</h2>
+    <p>This view only displays explanation fields already present in sample data or a locally selected screening API JSON response. It does not independently verify imported data, run model inference, request tokens, call an external provider, or override a backend decision.</p>
+    <label for="risk-json-file">Load local screening API JSON (optional): </label>
+    <input id="risk-json-file" type="file" accept="application/json,.json">
+    <p id="risk-import-status" class="muted">No local screening response loaded.</p>
+    <div id="risk-assessment" class="muted">No valid risk assessment is available.</div>
+  </section>
   <div class="grid" id="controls"></div>
   <section><h2>Transaction evidence</h2><div id="transaction" class="muted">No live transaction evidence is connected.</div></section>
   <section><h2>Demo statistics</h2><div id="statistics" class="muted">No verified backend statistics are connected.</div></section>
@@ -44,6 +52,45 @@ function addText(parent, label, value) {
   row.append(name, text);
   parent.append(row);
 }
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function validNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+function validRiskAssessment(data) {
+  const assessment = isRecord(data) ? data.risk_assessment : null;
+  if (!isRecord(assessment) || !Number.isFinite(assessment.anomaly_score) || assessment.anomaly_score < 0 || assessment.anomaly_score > 1 || !validNonEmptyString(assessment.model_version) || !validNonEmptyString(assessment.training_dataset_id) || !validNonEmptyString(assessment.scored_at) || !validNonEmptyString(assessment.decision)) return null;
+  const explanation = assessment.explanation;
+  if (!isRecord(explanation) || !validNonEmptyString(explanation.version) || !Array.isArray(explanation.reason_codes) || !explanation.reason_codes.every(validNonEmptyString) || !validNonEmptyString(explanation.summary) || !Array.isArray(explanation.feature_signals) || !validNonEmptyString(explanation.method)) return null;
+  if (!explanation.feature_signals.every(signal => isRecord(signal) && validNonEmptyString(signal.feature) && Number.isFinite(signal.value) && validNonEmptyString(signal.reason_code) && validNonEmptyString(signal.description))) return null;
+  return assessment;
+}
+function showRiskUnavailable(message) {
+  const target = document.getElementById('risk-assessment');
+  target.textContent = '';
+  addText(target, 'Risk explanation', message);
+}
+function renderRiskAssessment(assessment, source) {
+  const target = document.getElementById('risk-assessment');
+  target.textContent = '';
+  addText(target, 'Source', source);
+  addText(target, 'Model version', assessment.model_version);
+  addText(target, 'Training dataset', assessment.training_dataset_id);
+  addText(target, 'Decision', assessment.decision);
+  addText(target, 'Scored at', assessment.scored_at);
+  addText(target, 'Anomaly ranking score (not fraud probability)', assessment.anomaly_score);
+  addText(target, 'Explanation version', assessment.explanation.version);
+  addText(target, 'Method', assessment.explanation.method);
+  addText(target, 'Summary', assessment.explanation.summary);
+  addText(target, 'Reason codes', assessment.explanation.reason_codes.length ? assessment.explanation.reason_codes.join(', ') : 'none');
+  addText(target, 'Feature signals', assessment.explanation.feature_signals.length ? '' : 'none');
+  for (const signal of assessment.explanation.feature_signals) {
+    addText(target, `${signal.feature} — value`, signal.value);
+    addText(target, `${signal.feature} — reason code`, signal.reason_code);
+    addText(target, `${signal.feature} — description`, signal.description);
+  }
+}
 const controls = document.getElementById('controls');
 for (const label of ['JWT signature verification', 'DPoP proof verification', 'Durable grant ledger', 'Fraud risk scoring']) {
   const card = document.createElement('div');
@@ -56,9 +103,46 @@ for (const label of ['JWT signature verification', 'DPoP proof verification', 'D
   card.append(heading, state);
   controls.append(card);
 }
+let importedRiskAssessment = false;
+const riskFileInput = document.getElementById('risk-json-file');
+const riskImportStatus = document.getElementById('risk-import-status');
+riskFileInput.addEventListener('change', event => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let parsed;
+    try {
+      parsed = JSON.parse(String(reader.result));
+    } catch {
+      riskImportStatus.textContent = 'Rejected: selected file is not valid JSON.';
+      showRiskUnavailable('No valid risk assessment was loaded.');
+      return;
+    }
+    const assessment = validRiskAssessment(parsed);
+    if (!assessment) {
+      riskImportStatus.textContent = 'Rejected: JSON must contain a valid risk_assessment object.';
+      showRiskUnavailable('No valid risk assessment was loaded.');
+      return;
+    }
+    importedRiskAssessment = true;
+    riskImportStatus.textContent = 'Loaded a local screening response for display only.';
+    renderRiskAssessment(assessment, 'Local file (not independently verified)');
+  };
+  reader.onerror = () => {
+    riskImportStatus.textContent = 'Rejected: local file could not be read.';
+    showRiskUnavailable('No valid risk assessment was loaded.');
+  };
+  reader.readAsText(file);
+});
 fetch('hasil.json')
   .then(response => { if (!response.ok) throw new Error('Demo data unavailable'); return response.json(); })
   .then(data => {
+    if (!importedRiskAssessment) {
+      const assessment = validRiskAssessment(data);
+      if (assessment) renderRiskAssessment(assessment, 'Sample data (not independently verified)');
+      else showRiskUnavailable('No valid risk assessment is present in the sample data.');
+    }
     const tx = data.transaksi_terakhir;
     const transaction = document.getElementById('transaction');
     transaction.textContent = '';
