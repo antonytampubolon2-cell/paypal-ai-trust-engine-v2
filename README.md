@@ -86,6 +86,26 @@ The candidate model metadata and validation-selected threshold are frozen before
 
 **These are synthetic benchmark results, not real-world fraud-detection guarantees.** Validation has already informed previous work, so results still require genuinely independent representative data and a separate authorized review before any production integration. Production remains the existing v1 scorer at threshold **0.65**, with all authentication, reservation, reviewer and payment safeguards unchanged.
 
+### Synthetic Benchmark v3 — separate offline research
+
+```bash
+python scripts/evaluate_benchmark_v3.py --max-validation-fpr 0.01
+```
+
+Outputs are `evaluation/synthetic_v3_research_report.json` and `evaluation/synthetic_v3_research_freeze.json`. The freeze artifact is written before final holdout generation. `--output`, `--metadata-output` and a fixed UTC `--timestamp` support reproducible research runs; the runner rejects attempts to overwrite existing non-v3 repository artifacts. No production configuration or provider credentials are required.
+
+**Historical context:** the v2 read-only audit reproduced perfect synthetic scores without direct label/scenario inputs to fitting. However, its labels were recoverable by cumulative utilization ≥0.8 OR velocity ≥0.8, its training support differed from ledger features, and feature provenance mixed the raw-schema identifier `trusted-risk-features-v1` with transform identifier `trusted-upper-tail-marginals-v2`. Its 0/160 observed false positives had a one-sided 95% binomial upper bound of about 1.855%, not a ≤1% population guarantee. V1/v2 code, thresholds, metadata and historical reports remain unchanged.
+
+V3 uses the same four canonical signals from `Ledger.risk_features` (`trustguard.py`): exact minor-unit amount/grant ratio; cumulative active spending including the current transaction; active ten-minute transaction count normalized/capped at five; and binary payee history. Histories respect currency/grant filters, active states, current-transaction exclusion, positive integer minor units, cumulative utilization ≥amount utilization, and velocity values `{0,0.2,0.4,0.6,0.8,1}`. Tests compare offline features with the real extractor on equivalent temporary synthetic ledger histories. No runtime feature is added.
+
+The explicit v3 feature identifier is **`trustguard-canonical-ledger-v3-research`**. It binds this canonical input contract and research provenance, not a new live schema. Internal raw/interaction representations are separately named model configurations. V3 rejects incompatible feature/model metadata, including either historical v2 identifier; it never silently falls back. Historical raw-schema versus transformed-representation names are explained here rather than rewriting frozen v2 artifacts.
+
+The generator includes benign high utilization, benign high velocity, benign new payees, abusive counterparts with overlapping feature support, low-signal anomalies and smooth interaction scenarios. Labels are stochastic synthetic latent-context outcomes, not simple utilization/velocity threshold labels. Scenario descriptions, latent context and `hidden_label` remain outside the scorer matrix. Within-split equal-feature/opposite-label examples explicitly demonstrate irreducible ambiguity; they are not copied across splits. The training mixture is fit as unlabeled feature data, without filtering on hidden targets.
+
+Data-generation seeds are training `20261110`, validation `20261111`, final holdout `20261112`, and diagnostics `20261113`; forest random states use separate identifiers. Two predeclared IsolationForest configurations (raw and interaction representation) are fitted on training only. Validation selects the candidate/threshold for maximum observed recall under the empirical FPR ceiling with deterministic ties. Source/data/model/threshold fingerprints are frozen before holdout generation. The holdout includes known scenarios and predeclared previously unseen feature combinations. A freeze digest documents in-run ordering; it is not independent external proof that no earlier experiments occurred.
+
+The report records confusion matrices, precision, recall, F1, ROC-AUC, average precision, known/unseen and per-scenario false positives/negatives, nominal confidence intervals and one-sided 95% upper FPR bounds. Robustness checks cover ablation, supported perturbations, boundaries, training-range OOD flags and unsupported inputs. Counterfactual ablations retain original synthetic labels and are reliance diagnostics, not causal attribution. Binomial/bootstrap intervals are synthetic reference summaries with stated independence assumptions; matched examples and scenario strata limit interpretation. **Neither observed synthetic FPR nor its interval is a real-world population guarantee.** Production remains v1 at 0.65; v3 is not integrated into authorization or payment dispatch.
+
 ## Required environment variables
 
 The API fails closed unless these variables are set:

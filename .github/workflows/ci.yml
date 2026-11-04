@@ -44,6 +44,8 @@ jobs:
               Path("risk_calibration.py"), Path("scripts/calibrate_risk_threshold.py"),
               Path("risk_candidate_v2.py"), Path("risk_candidate_evaluation.py"),
               Path("scripts/evaluate_candidate_v2.py"),
+              Path("benchmark_v3_data.py"), Path("risk_candidate_v3.py"),
+              Path("benchmark_v3_evaluation.py"), Path("scripts/evaluate_benchmark_v3.py"),
               *Path("tests").glob("test_*.py"),
           ]
           for path in paths:
@@ -65,6 +67,9 @@ jobs:
 
       - name: Evaluate offline v2 candidate on fresh synthetic holdout (not active)
         run: python scripts/evaluate_candidate_v2.py --output /tmp/trustguard-v2-report.json --metadata-output /tmp/trustguard-v2-metadata.json
+
+      - name: Evaluate overlapping synthetic v3 research benchmark (not active)
+        run: python scripts/evaluate_benchmark_v3.py --output /tmp/trustguard-v3-report.json --metadata-output /tmp/trustguard-v3-freeze.json
 
       - name: Build container locally (no registry push)
         run: docker build --tag trustguard-ci:${GITHUB_SHA} .
