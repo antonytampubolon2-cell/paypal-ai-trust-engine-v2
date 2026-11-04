@@ -70,9 +70,12 @@ export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
 pytest -q
 ```
 
-To run the API, provide the required variables from the authorized Sandbox onboarding/configuration, then use:
+The GitHub Actions workflow runs on pushes to the remediation branch, pull requests targeting `main`, and manual `workflow_dispatch`. It has `contents: read` permissions, uses Python 3.12 to match the Docker base image, runs syntax validation and all tests, and builds/runs a local container smoke test without publishing an image. Its smoke test uses synthetic non-secret seller identifiers and never requests provider credentials.
+
+To run the API locally, provide the required variables from the authorized Sandbox onboarding/configuration, explicitly keep dispatch disabled, then use:
 
 ```bash
+export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
 uvicorn app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
@@ -94,7 +97,14 @@ docker run --rm --name trustguard-local \
   trustguard-local
 ```
 
-The image provides `TRUSTGUARD_DATABASE_PATH=/data/trustguard.sqlite3` and disables PayPal Sandbox dispatch. No public endpoint or deployment is configured. Use HTTPS termination before accepting tokens over a network and do not register a Seller Service until an actual HTTPS URL and onboarding values have been confirmed.
+The image provides `TRUSTGUARD_DATABASE_PATH=/data/trustguard.sqlite3` and disables PayPal Sandbox dispatch. Verify the local smoke endpoints with:
+
+```bash
+curl --fail http://127.0.0.1:8000/healthz
+curl --fail http://127.0.0.1:8000/openapi.json | python -c 'import json,sys; assert "/v1/agent/authorize" in json.load(sys.stdin)["paths"]'
+```
+
+No image is published and no public endpoint or deployment is configured. Use HTTPS termination before accepting tokens over a network and do not register a Seller Service until an actual HTTPS URL and onboarding values have been confirmed. **PayPal Sandbox dispatch remains disabled by default; do not set the opt-in flag for this API.**
 
 ## Files
 

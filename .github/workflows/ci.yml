@@ -1,0 +1,101 @@
+name: TrustGuard CI
+
+on:
+  push:
+    branches:
+      - manus/trustguard-security-remediation-2026-11-12
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Tests and container smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 (matches Dockerfile)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate Python syntax
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          paths = [
+              Path("app.py"), Path("skyfire_auth.py"),
+              Path("trustguard.py"), Path("paypal_rest.py"),
+              *Path("tests").glob("test_*.py"),
+          ]
+          for path in paths:
+              ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          print(f"Syntax validated for {len(paths)} Python files")
+          PY
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+      - name: Build container locally (no registry push)
+        run: docker build --tag trustguard-ci:${GITHUB_SHA} .
+
+      - name: Smoke-test health, OpenAPI, and disabled payment dispatch
+        env:
+          # Synthetic non-secret values used only to make readiness pass in this isolated smoke test.
+          SKYFIRE_ISSUER: https://app-sandbox.skyfire.xyz
+          SKYFIRE_JWKS_URL: https://app-sandbox.skyfire.xyz/.well-known/jwks.json
+          SKYFIRE_EXPECTED_ENVIRONMENT: sandbox
+          SKYFIRE_SELLER_AGENT_ACCOUNT_ID: ci-test-seller-account-not-a-credential
+          SKYFIRE_SELLER_SERVICE_ID: ci-test-seller-service-not-a-credential
+          TRUSTGUARD_ENABLE_PAYPAL_SANDBOX: "false"
+        run: |
+          set -euo pipefail
+          name=trustguard-ci-smoke
+          image="trustguard-ci:${GITHUB_SHA}"
+          cleanup() {
+            docker logs "$name" 2>/dev/null || true
+            docker rm -f "$name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --rm --name "$name" \
+            --publish 127.0.0.1:18080:8000 \
+            --env SKYFIRE_ISSUER \
+            --env SKYFIRE_JWKS_URL \
+            --env SKYFIRE_EXPECTED_ENVIRONMENT \
+            --env SKYFIRE_SELLER_AGENT_ACCOUNT_ID \
+            --env SKYFIRE_SELLER_SERVICE_ID \
+            --env TRUSTGUARD_ENABLE_PAYPAL_SANDBOX \
+            "$image"
+
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/healthz > /tmp/trustguard-health.json; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo "Container did not become ready"
+            exit 1
+          fi
+          python -c 'import json; assert json.load(open("/tmp/trustguard-health.json"))["status"] == "ok"'
+
+          curl --fail --silent --show-error http://127.0.0.1:18080/openapi.json \
+            | python -c 'import json,sys; spec=json.load(sys.stdin); assert "/v1/agent/authorize" in spec["paths"]; params=spec["paths"]["/v1/agent/authorize"]["post"]["parameters"]; assert any(p["in"] == "header" and p["name"] == "skyfire-pay-id" and p["required"] for p in params)'
+
+          docker exec "$name" python -c 'import os; assert os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() == "false"'
+          echo "Container health, OpenAPI, and disabled-dispatch checks passed"
