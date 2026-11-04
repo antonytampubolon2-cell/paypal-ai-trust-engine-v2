@@ -105,12 +105,17 @@ class CanonicalTransaction:
     idempotency_key: str
     amount_minor: int
     currency: str
-    payee: str
+    payee: str | None
+    skyfire_service_id: str | None = None
+    paypal_merchant_id: str | None = None
 
     @classmethod
-    def build(cls, *, transaction_id: str, idempotency_key: str, amount: str | Decimal, currency: str, payee: str, supported_currencies: tuple[str, ...] = ("USD",)) -> "CanonicalTransaction":
-        if not transaction_id or not idempotency_key or not payee:
-            raise SecurityError("transaction identity, idempotency key, and payee are required")
+    def build(cls, *, transaction_id: str, idempotency_key: str, amount: str | Decimal, currency: str, payee: str | None = None, skyfire_service_id: str | None = None, paypal_merchant_id: str | None = None, supported_currencies: tuple[str, ...] = ("USD",)) -> "CanonicalTransaction":
+        if not transaction_id or not idempotency_key or not any((payee, skyfire_service_id, paypal_merchant_id)):
+            raise SecurityError("transaction identity, idempotency key, and trusted payee binding are required")
+        if payee is not None and paypal_merchant_id is not None and payee != paypal_merchant_id:
+            raise SecurityError("legacy payee conflicts with configured PayPal merchant identity")
+        merchant = paypal_merchant_id if paypal_merchant_id is not None else payee
         if currency not in supported_currencies:
             raise SecurityError("unsupported currency")
         try:
@@ -122,11 +127,15 @@ class CanonicalTransaction:
         minor = int(value * 100)
         if Decimal(minor) / 100 != value:
             raise SecurityError("amount is not an exact minor-unit value")
-        return cls(transaction_id, idempotency_key, minor, currency, payee)
+        return cls(transaction_id, idempotency_key, minor, currency, merchant, skyfire_service_id, merchant)
 
     @property
     def amount_decimal(self) -> Decimal:
         return Decimal(self.amount_minor) / 100
+
+    @property
+    def risk_payee_identity(self) -> str:
+        return self.paypal_merchant_id or self.skyfire_service_id or self.payee or ""
 
 
 def _b64url(data: bytes) -> str:
@@ -245,8 +254,9 @@ class Ledger:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS transactions (
                     transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
-                    amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
+                    amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT,
+                    skyfire_service_id TEXT, paypal_merchant_id TEXT,
+                    status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','REVIEW_RELEASED','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
                     provider_order_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS tx_grant_status ON transactions(grant_id, status);
@@ -260,19 +270,34 @@ class Ledger:
                     scored_at REAL NOT NULL,
                     features_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS transaction_reviews (
+                    transaction_id TEXT PRIMARY KEY,
+                    reviewer_id TEXT NOT NULL,
+                    decision TEXT NOT NULL CHECK(decision IN ('KEEP_HOLD','RELEASE_RESERVATION')),
+                    reason TEXT NOT NULL,
+                    reviewed_at REAL NOT NULL
+                );
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()[0]
-            if "'SCREENED_ALLOW'" not in schema:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(transactions)")}
+            if ("'SCREENED_ALLOW'" not in schema or "'REVIEW_RELEASED'" not in schema
+                    or not {"skyfire_service_id", "paypal_merchant_id"}.issubset(columns)):
                 try:
                     db.executescript("""
                     BEGIN IMMEDIATE;
                     CREATE TABLE transactions_new (
                         transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
-                        amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT NOT NULL,
-                        status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
+                        amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL, payee TEXT,
+                        skyfire_service_id TEXT, paypal_merchant_id TEXT,
+                        status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','REVIEW_RELEASED','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','FAILED','UNKNOWN')),
                         provider_order_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
                     );
-                    INSERT INTO transactions_new SELECT transaction_id,grant_id,idempotency_key,amount_minor,currency,payee,
+                    INSERT INTO transactions_new(transaction_id,grant_id,idempotency_key,amount_minor,currency,payee,
+                      skyfire_service_id,paypal_merchant_id,status,provider_order_id,created_at,updated_at)
+                    SELECT transaction_id,grant_id,idempotency_key,amount_minor,currency,
+                      CASE WHEN grant_id LIKE 'skyfire:%' THEN NULL ELSE payee END,
+                      CASE WHEN grant_id LIKE 'skyfire:%' THEN payee ELSE NULL END,
+                      CASE WHEN grant_id LIKE 'skyfire:%' THEN NULL ELSE payee END,
                       CASE status WHEN 'ORDER_CREATED' THEN 'CREATED' ELSE status END,
                       provider_order_id,created_at,updated_at FROM transactions;
                     DROP TABLE transactions;
@@ -318,9 +343,9 @@ class Ledger:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            existing = db.execute("SELECT transaction_id,status,grant_id,amount_minor,currency,payee FROM transactions WHERE idempotency_key=?", (tx.idempotency_key,)).fetchone()
+            existing = db.execute("SELECT transaction_id,status,grant_id,amount_minor,currency,payee,skyfire_service_id,paypal_merchant_id FROM transactions WHERE idempotency_key=?", (tx.idempotency_key,)).fetchone()
             if existing:
-                if existing[0] != tx.transaction_id or existing[2:] != (grant_id, tx.amount_minor, tx.currency, tx.payee):
+                if existing[0] != tx.transaction_id or existing[2:] != (grant_id, tx.amount_minor, tx.currency, tx.payee, tx.skyfire_service_id, tx.paypal_merchant_id):
                     raise SecurityError("idempotency key already belongs to a different transaction")
                 db.commit()
                 return existing[1]
@@ -333,7 +358,10 @@ class Ledger:
             if used + tx.amount_minor > max_spend_minor:
                 raise SecurityError("cumulative grant spending limit exceeded")
             now = time.time()
-            db.execute("INSERT INTO transactions VALUES(?,?,?,?,?,?, 'RESERVED', NULL, ?,?)", (tx.transaction_id, grant_id, tx.idempotency_key, tx.amount_minor, tx.currency, tx.payee, now, now))
+            db.execute(
+                "INSERT INTO transactions(transaction_id,grant_id,idempotency_key,amount_minor,currency,payee,skyfire_service_id,paypal_merchant_id,status,provider_order_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'RESERVED', NULL, ?,?)",
+                (tx.transaction_id, grant_id, tx.idempotency_key, tx.amount_minor, tx.currency, tx.payee, tx.skyfire_service_id, tx.paypal_merchant_id, now, now),
+            )
             db.commit()
             return "RESERVED"
         except Exception:
@@ -361,8 +389,8 @@ class Ledger:
                 (*params[:-1], tx.transaction_id, now - 600.0),
             ).fetchone()[0]
             prior_payee = db.execute(
-                f"SELECT 1 FROM transactions WHERE grant_id=? AND currency=? AND payee=? AND status IN ({placeholders}) AND transaction_id<>? LIMIT 1",
-                (grant_id, tx.currency, tx.payee, *active, tx.transaction_id),
+                f"SELECT 1 FROM transactions WHERE grant_id=? AND currency=? AND COALESCE(paypal_merchant_id,skyfire_service_id,payee)=? AND status IN ({placeholders}) AND transaction_id<>? LIMIT 1",
+                (grant_id, tx.currency, tx.risk_payee_identity, *active, tx.transaction_id),
             ).fetchone()
         finally:
             db.close()
@@ -407,11 +435,62 @@ class Ledger:
         finally:
             db.close()
 
+    def review_hold(self, transaction_id: str, *, reviewer_id: str, decision: str, reason: str, reviewed_at: float | None = None) -> dict[str, Any]:
+        """Atomically audit a HOLD review; RELEASE only abandons the reservation."""
+        if (not transaction_id or not reviewer_id or len(reviewer_id) > 128
+                or decision not in {"KEEP_HOLD", "RELEASE_RESERVATION"}
+                or not isinstance(reason, str) or not reason.strip() or len(reason) > 1000):
+            raise LedgerError("review request is invalid")
+        reviewed_at = time.time() if reviewed_at is None else reviewed_at
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute(
+                "SELECT reviewer_id,decision,reason,reviewed_at FROM transaction_reviews WHERE transaction_id=?",
+                (transaction_id,),
+            ).fetchone()
+            if prior:
+                if prior[:3] != (reviewer_id, decision, reason):
+                    raise LedgerError("transaction already has a different review decision")
+                db.commit()
+                return {
+                    "transaction_id": transaction_id, "reviewer_id": prior[0],
+                    "decision": prior[1], "reason": prior[2], "reviewed_at": prior[3],
+                    "transaction_state": db.execute("SELECT status FROM transactions WHERE transaction_id=?", (transaction_id,)).fetchone()[0],
+                }
+            row = db.execute("SELECT status,provider_order_id FROM transactions WHERE transaction_id=?", (transaction_id,)).fetchone()
+            if not row or row[0] != "HOLD" or row[1] is not None:
+                raise LedgerError("only an undispatched HOLD transaction can be reviewed")
+            next_state = "REVIEW_RELEASED" if decision == "RELEASE_RESERVATION" else "HOLD"
+            if decision == "RELEASE_RESERVATION":
+                changed = db.execute(
+                    "UPDATE transactions SET status='REVIEW_RELEASED',updated_at=? WHERE transaction_id=? AND status='HOLD' AND provider_order_id IS NULL",
+                    (reviewed_at, transaction_id),
+                ).rowcount
+                if changed != 1:
+                    raise LedgerError("HOLD changed before reservation release")
+            db.execute(
+                "INSERT INTO transaction_reviews(transaction_id,reviewer_id,decision,reason,reviewed_at) VALUES(?,?,?,?,?)",
+                (transaction_id, reviewer_id, decision, reason, reviewed_at),
+            )
+            db.commit()
+            return {
+                "transaction_id": transaction_id, "reviewer_id": reviewer_id,
+                "decision": decision, "reason": reason, "reviewed_at": reviewed_at,
+                "transaction_state": next_state,
+            }
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def transition(self, transaction_id: str, new_status: str, provider_order_id: str | None = None) -> None:
         allowed = {
             "RESERVED": {"DISPATCH_STARTED", "FAILED", "HOLD", "SCREENED_ALLOW"},
             "HOLD": set(),
             "SCREENED_ALLOW": {"DISPATCH_STARTED"},
+            "REVIEW_RELEASED": set(),
             "DISPATCH_STARTED": {"CREATED", "APPROVED", "FAILED", "UNKNOWN"},
             "CREATED": {"APPROVED", "COMPLETED", "FAILED", "UNKNOWN"},
             "APPROVED": {"COMPLETED", "FAILED", "UNKNOWN"},
@@ -434,10 +513,10 @@ class Ledger:
 
     def get(self, transaction_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
-            row = db.execute("SELECT t.transaction_id,t.grant_id,t.idempotency_key,t.amount_minor,t.currency,t.payee,t.status,t.provider_order_id,t.created_at,t.updated_at,r.anomaly_score,r.model_version,r.training_dataset_id,r.decision,r.scored_at,r.features_json FROM transactions t LEFT JOIN risk_assessments r ON r.transaction_id=t.transaction_id WHERE t.transaction_id=?", (transaction_id,)).fetchone()
+            row = db.execute("SELECT t.transaction_id,t.grant_id,t.idempotency_key,t.amount_minor,t.currency,t.payee,t.skyfire_service_id,t.paypal_merchant_id,t.status,t.provider_order_id,t.created_at,t.updated_at,r.anomaly_score,r.model_version,r.training_dataset_id,r.decision,r.scored_at,r.features_json,v.reviewer_id,v.decision,v.reason,v.reviewed_at FROM transactions t LEFT JOIN risk_assessments r ON r.transaction_id=t.transaction_id LEFT JOIN transaction_reviews v ON v.transaction_id=t.transaction_id WHERE t.transaction_id=?", (transaction_id,)).fetchone()
         if not row:
             return None
-        record = dict(zip(("transaction_id","grant_id","idempotency_key","amount_minor","currency","payee","status","provider_order_id","created_at","updated_at","anomaly_score","risk_model_version","risk_training_dataset_id","risk_decision","risk_scored_at","risk_features_json"), row))
+        record = dict(zip(("transaction_id","grant_id","idempotency_key","amount_minor","currency","payee","skyfire_service_id","paypal_merchant_id","status","provider_order_id","created_at","updated_at","anomaly_score","risk_model_version","risk_training_dataset_id","risk_decision","risk_scored_at","risk_features_json","reviewer_id","review_decision","review_reason","reviewed_at"), row))
         record["risk_features"] = json.loads(record.pop("risk_features_json")) if record["risk_features_json"] is not None else None
         return record
 
@@ -496,12 +575,12 @@ class RiskScreeningPipeline:
 
     def screen_authorized_transaction(
         self, tx: CanonicalTransaction, *, grant_id: str, max_spend_minor: int,
-        grant_currency: str, authorized_payees: tuple[str, ...],
+        grant_currency: str, authorized_service_id: str,
     ) -> dict[str, Any]:
         if not grant_id or not isinstance(max_spend_minor, int) or isinstance(max_spend_minor, bool) or max_spend_minor <= 0:
             raise SecurityError("authenticated transaction authorization is invalid")
-        if tx.currency != grant_currency or tx.payee not in authorized_payees:
-            raise SecurityError("transaction currency or payee is not authorized")
+        if tx.currency != grant_currency or not authorized_service_id or tx.skyfire_service_id != authorized_service_id:
+            raise SecurityError("transaction currency or Skyfire service is not authorized")
         if tx.amount_minor > max_spend_minor:
             raise SecurityError("transaction exceeds authenticated amount limit")
         state = self.ledger.reserve(grant_id, tx, max_spend_minor, grant_currency)
@@ -596,7 +675,7 @@ class TrustGuard:
             raise SecurityError("grant limit must be a positive integer in minor units")
         grant_id = grant["_canonical_grant_id"]
         status = self.ledger.reserve(grant_id, tx, max_spend, grant[self.config.grant_currency_field])
-        if status in {"DISPATCH_STARTED", "UNKNOWN", "HOLD"}:
+        if status in {"DISPATCH_STARTED", "UNKNOWN", "HOLD", "REVIEW_RELEASED"}:
             return {"status": status, "transaction_id": tx.transaction_id}
         if status in {"CREATED", "APPROVED", "COMPLETED", "FAILED"}:
             return {"status": status, "transaction_id": tx.transaction_id}

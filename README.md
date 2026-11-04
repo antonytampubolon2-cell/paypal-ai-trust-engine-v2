@@ -12,6 +12,7 @@ The API accepts `skyfire-pay-id` as requested. Skyfire currently documents `kyap
 - `GET /openapi.json`: generated OpenAPI document. It marks `skyfire-pay-id` as a required request header.
 - `POST /v1/agent/authorize`: validates the signed token and returns a minimized claim projection. The response explicitly says `paypal_payment_status: NOT_STARTED` and `paypal_payment_authorized: false`.
 - `POST /v1/agent/screen-transaction`: requires a valid Skyfire PAY/KYA-PAY token, validates a canonical request, durably reserves it against an identity derived from verified token claims, and invokes the existing local IsolationForest scorer. It returns `ALLOW` or `HOLD`, a reason code, and persisted model metadata. This route has no provider dependency and never creates or captures a PayPal order.
+- `POST /v1/admin/transactions/{transaction_id}/review`: when separately configured, records `KEEP_HOLD` or `RELEASE_RESERVATION` with a review reason. Release marks only a still-undispatched HOLD as `REVIEW_RELEASED`; it does not authorize payment.
 
 The API does not use `jti` as a request id or one-use replay key. The verifier requires a UUID-format `jti` as the token identifier, but repeated presentation of the same valid token is permitted until its expiration. The API does not persist `jti`, the raw token, or `sti`. A repeated token is not itself a second PayPal operation: actual dispatch de-duplication remains tied to TrustGuard's separate canonical application `transaction_id` and `idempotency_key`, recorded atomically by its SQLite ledger. The `/v1/agent/authorize` endpoint itself initiates no payment operation. The separate legacy TrustGuard DPoP/access-token path retains its own replay checks; it is not used by this Skyfire endpoint.
 
@@ -25,7 +26,11 @@ The estimator is `sklearn.ensemble.IsolationForest`, versioned as `trustguard-is
 
 Immediately after signed access-token and DPoP verification, authenticated grant currency/payee/limit checks, and the durable spending reservation—and before persisting `DISPATCH_STARTED` or calling any provider—the guard derives four features from the canonical transaction and existing ledger: `amount_to_grant_ratio`, `cumulative_spending_ratio`, `recent_velocity_ratio` (prior active transactions in the preceding ten minutes, normalized/capped at five), and `new_payee`. No caller-supplied risk feature is accepted. The model's IsolationForest margin is sigmoid-mapped to a 0–1 **anomaly ranking score**, with `HOLD` at score ≥0.65. This is not a calibrated probability of fraud, and this synthetic model is not validated for production or payment authorization.
 
-The screening route binds currency to the signed token, requires `payee` to equal the verified `tsi` (the configured Skyfire Seller Service ID, not a PayPal merchant ID), and treats signed `amt` as the maximum authorized amount. Requests above that cap are rejected; lower amounts remain within the signed ceiling. A deterministic grant-ledger identity is derived from verified issuer, subject, audience, and service ID. The guard can only return `ALLOW` for an already-authorized transaction or place it on durable `HOLD`; it cannot alter transaction terms or bypass grant controls. A high score, scoring exception, malformed result, or unavailable model records a HOLD (score may be unavailable/null) and prevents provider invocation. Score, decision, model version, synthetic dataset ID, feature projection, and timestamp are persisted in SQLite. The screen-only state `SCREENED_ALLOW` is distinct from provider dispatch. HOLD and ALLOW reservations remain counted against cumulative ledger limits; no automatic or administrative HOLD release flow is implemented. The route never constructs a provider and reports `paypal_dispatch: DISABLED_NOT_CALLED`. PayPal Sandbox dispatch remains opt-in and disabled by default elsewhere.
+The screening route binds currency to the signed token and obtains Skyfire `tsi` only from verified claims. The request body has no payee or merchant-ID field. Signed `amt` is treated as the maximum authorized amount. Requests above that cap are rejected; lower amounts remain within the signed ceiling. A deterministic grant-ledger identity is derived from verified issuer, subject, audience, and service ID. The screen-only state `SCREENED_ALLOW` is distinct from provider dispatch. HOLD and ALLOW reservations remain counted against cumulative ledger limits unless an authenticated reviewer releases a still-undispatched HOLD as `REVIEW_RELEASED`. Release only abandons the reservation; it never changes the ML HOLD decision into ALLOW, authorizes payment, or starts dispatch. Risk evidence is persisted in SQLite. The screening route never constructs a provider and reports `paypal_dispatch: DISABLED_NOT_CALLED`. PayPal Sandbox dispatch remains opt-in and disabled by default elsewhere.
+
+Skyfire `tsi` and PayPal merchant ID are separate identifier namespaces and are persisted separately as `skyfire_service_id` and `paypal_merchant_id`. The trusted server-side mapping requires `TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID` (must exactly equal `SKYFIRE_SELLER_SERVICE_ID`) and `TRUSTGUARD_PAYPAL_MERCHANT_ID`. Neither value is accepted from the screening request. If mapping values are missing or inconsistent, the response says `paypal_integration_status: NOT_CONFIGURED` and the ledger stores no PayPal merchant ID. A configured mapping says only `CONFIGURED`; it does not enable or invoke PayPal.
+
+Administrative review is disabled unless both `TRUSTGUARD_REVIEWER_ID` and `TRUSTGUARD_REVIEWER_CREDENTIAL` are present. Reviewer identity is server-configured; the credential is compared in constant time and never returned or logged. The durable audit records reviewer ID, decision, reason, and timestamp. Only an exact repeat of the same authenticated decision/reason is idempotent; conflicting later reviews are rejected. `UNKNOWN`, `DISPATCH_STARTED`, any non-HOLD state, and any row with a provider order ID cannot be released. Keep the reviewer credential in a secret manager/environment injection, never in source, README examples, or shell history.
 
 ## Required environment variables
 
@@ -41,6 +46,16 @@ The API fails closed unless these variables are set:
 Optional integration-specific variable:
 
 - `SKYFIRE_TARGET_DOMAIN`: set only when this integration identifies its target by domain. When set, token `tdm` must exactly match this value. When unset, `tdm` is not required or returned.
+
+Optional trusted Skyfire-to-PayPal mapping (both must be set; otherwise `paypal_integration_status` is `NOT_CONFIGURED` and no merchant ID is stored; neither enables PayPal dispatch):
+
+- `TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID`: source Skyfire Seller Service ID for the mapping; must exactly equal `SKYFIRE_SELLER_SERVICE_ID`, otherwise the mapping is treated as inconsistent.
+- `TRUSTGUARD_PAYPAL_MERCHANT_ID`: PayPal merchant account identity mapped to that service ID; must differ from the Skyfire service ID; never accepted from an HTTP request.
+
+Optional administrative HOLD review (both must be set; otherwise the review endpoint returns `503` and performs no action):
+
+- `TRUSTGUARD_REVIEWER_ID`: server-configured reviewer identity recorded in the audit trail.
+- `TRUSTGUARD_REVIEWER_CREDENTIAL`: reviewer secret compared in constant time against the `x-trustguard-reviewer-credential` header; keep it in secret storage and never print, log, or commit it.
 
 The implementation accepts only the documented Sandbox issuer/JWKS pair above, requires HTTPS, checks that JWKS is the well-known URI formed from the configured issuer, and never derives a URL from the token's untrusted `iss`. The configured expected environment must be `sandbox`. It uses ES256 only; requires `kid` and `typ` (`kya+jwt`, `pay+jwt`, or `kya-pay+jwt`); validates signature, `iss`, `aud`, `env`, `tsi`, `iat`, `exp`, and UUID `jti`; and caches validated public keys for 300 seconds. The cache does not refresh on attacker-supplied unknown `kid` values. For PAY/KYA-PAY, it additionally validates positive `amt`/`val`, `cur=USD`, `stp` in `coin`/`card`/`bank`, and `sti.verified=true` without returning or storing `sti`.
 
@@ -100,10 +115,12 @@ POST /v1/agent/screen-transaction
 skyfire-pay-id: <valid, issuer-signed PAY or KYA-PAY token>
 Content-Type: application/json
 
-{"transaction_id":"<unique-local-id>","idempotency_key":"<unique-idempotency-key>","amount":"<positive USD amount not above signed amt>","currency":"USD","payee":"<the exact configured Seller Service ID / signed tsi>"}
+{"transaction_id":"<unique-local-id>","idempotency_key":"<unique-idempotency-key>","amount":"<positive USD amount not above signed amt>","currency":"USD"}
 ```
 
-Do not use placeholder transaction values as live payment identifiers. An allowed screening is not a PayPal authorization or order; the response always states that PayPal dispatch was not called. This demo has no HTTP route that creates/captures orders.
+The response reports authenticated `skyfire_service_id` separately from trusted `paypal_merchant_id` (or null if `NOT_CONFIGURED`). Do not include a merchant ID in the request; extra fields are rejected. An allowed screening is not PayPal authorization or an order; the response states that PayPal dispatch was not called. No HTTP route creates or captures orders.
+
+For hold review, inject both reviewer variables from secure environment configuration, then send `POST /v1/admin/transactions/{transaction_id}/review` with `x-trustguard-reviewer-credential` and JSON such as `{"decision":"RELEASE_RESERVATION","reason":"reviewed under approved operational procedure"}`. The server uses the configured reviewer identity. This only releases a still-undispatched HOLD reservation; it never approves or dispatches payment. If reviewer configuration is missing, the endpoint returns service unavailable without reviewing anything.
 
 The GitHub Actions workflow runs on pushes to the remediation branch, pull requests targeting `main`, and manual `workflow_dispatch`. It has `contents: read` permissions, uses Python 3.12 to match the Docker base image, runs syntax validation and all tests, and builds/runs a local container smoke test without publishing an image. Its smoke test uses synthetic non-secret seller identifiers and never requests provider credentials.
 

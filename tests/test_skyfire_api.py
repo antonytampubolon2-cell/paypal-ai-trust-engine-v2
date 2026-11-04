@@ -122,14 +122,16 @@ def local_screening_app(tmp_path, *, amount="50.00", risk_scorer_marker="real"):
     return create_app(**kwargs), token, db_path
 
 
-def submit_local_screening(app, token, *, transaction_id="screen-tx-1", idempotency_key="screen-idem-1", amount="5.00", currency="USD", payee=SERVICE_ID):
-    body = json.dumps({
+def submit_local_screening(app, token, *, transaction_id="screen-tx-1", idempotency_key="screen-idem-1", amount="5.00", currency="USD", paypal_merchant_override=None):
+    payload = {
         "transaction_id": transaction_id,
         "idempotency_key": idempotency_key,
         "amount": amount,
         "currency": currency,
-        "payee": payee,
-    }).encode()
+    }
+    if paypal_merchant_override is not None:
+        payload["paypal_merchant_id"] = paypal_merchant_override
+    body = json.dumps(payload).encode()
     return asgi_request(
         app, "POST", "/v1/agent/screen-transaction",
         headers={"skyfire-pay-id": token, "content-type": "application/json"},
@@ -406,10 +408,9 @@ def test_screening_rejects_invalid_skyfire_signature(tmp_path):
 
 @pytest.mark.parametrize("overrides", [
     {"amount": "50.01"},
-    {"payee": "unbound-payee"},
     {"currency": "EUR"},
 ])
-def test_screening_rejects_amount_currency_or_payee_mismatch(tmp_path, overrides):
+def test_screening_rejects_amount_or_currency_mismatch(tmp_path, overrides):
     app, token, db_path = local_screening_app(tmp_path, amount="50.00")
     status, _, body = submit_local_screening(app, token, **overrides)
     assert status == 403
@@ -465,3 +466,197 @@ def test_screening_fails_closed_without_skyfire_configuration(monkeypatch, tmp_p
     app = create_app()
     status, _, _ = submit_local_screening(app, "synthetic-local-token")
     assert status == 503
+
+
+TEST_PAYPAL_MERCHANT = "LOCAL-TEST-PAYPAL-MERCHANT-01"
+TEST_REVIEWER_ID = "LOCAL-TEST-REVIEWER-01"
+TEST_REVIEWER_CREDENTIAL = "local-test-only-review-credential-not-a-secret"
+
+
+def configure_test_mapping(monkeypatch, *, service_id=SERVICE_ID, merchant_id=TEST_PAYPAL_MERCHANT):
+    monkeypatch.setenv("TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID", service_id)
+    monkeypatch.setenv("TRUSTGUARD_PAYPAL_MERCHANT_ID", merchant_id)
+
+
+def configure_test_reviewer(monkeypatch):
+    monkeypatch.setenv("TRUSTGUARD_REVIEWER_ID", TEST_REVIEWER_ID)
+    monkeypatch.setenv("TRUSTGUARD_REVIEWER_CREDENTIAL", TEST_REVIEWER_CREDENTIAL)
+
+
+def submit_review(app, transaction_id, *, decision="RELEASE_RESERVATION", reason="LOCAL TEST ONLY synthetic HOLD review", credential=TEST_REVIEWER_CREDENTIAL):
+    body = json.dumps({"decision": decision, "reason": reason}).encode()
+    return asgi_request(
+        app, "POST", f"/v1/admin/transactions/{transaction_id}/review",
+        headers={"x-trustguard-reviewer-credential": credential, "content-type": "application/json"},
+        body=body,
+    )
+
+
+def clear_test_mapping(monkeypatch):
+    monkeypatch.delenv("TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID", raising=False)
+    monkeypatch.delenv("TRUSTGUARD_PAYPAL_MERCHANT_ID", raising=False)
+
+
+def clear_test_reviewer(monkeypatch):
+    monkeypatch.delenv("TRUSTGUARD_REVIEWER_ID", raising=False)
+    monkeypatch.delenv("TRUSTGUARD_REVIEWER_CREDENTIAL", raising=False)
+
+
+def test_skyfire_service_id_and_paypal_merchant_are_distinct_server_mapped_fields(tmp_path, monkeypatch):
+    configure_test_mapping(monkeypatch)
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token, amount="5.00")
+    result = json.loads(body)
+    record = Ledger(db_path).get("screen-tx-1")
+    assert status == 200
+    assert result["skyfire_service_id"] == SERVICE_ID
+    assert result["paypal_merchant_id"] == TEST_PAYPAL_MERCHANT
+    assert result["paypal_integration_status"] == "CONFIGURED"
+    assert result["skyfire_service_id"] != result["paypal_merchant_id"]
+    assert record["skyfire_service_id"] == SERVICE_ID
+    assert record["paypal_merchant_id"] == TEST_PAYPAL_MERCHANT
+
+
+def test_missing_or_inconsistent_merchant_mapping_is_not_configured(tmp_path, monkeypatch):
+    clear_test_mapping(monkeypatch)
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token)
+    result = json.loads(body)
+    record = Ledger(db_path).get("screen-tx-1")
+    assert status == 200
+    assert result["paypal_integration_status"] == "NOT_CONFIGURED"
+    assert result["paypal_merchant_id"] is None
+    assert record["skyfire_service_id"] == SERVICE_ID
+    assert record["paypal_merchant_id"] is None
+
+    other = tmp_path / "mismatch"
+    configure_test_mapping(monkeypatch, service_id="different-skyfire-service")
+    app_bad, token_bad, db_bad = local_screening_app(other, amount="50.00")
+    status, _, body = submit_local_screening(app_bad, token_bad)
+    result = json.loads(body)
+    assert status == 200
+    assert result["paypal_integration_status"] == "NOT_CONFIGURED"
+    assert result["paypal_merchant_id"] is None
+    assert Ledger(db_bad).get("screen-tx-1")["skyfire_service_id"] == SERVICE_ID
+
+
+def test_untrusted_screen_request_cannot_override_configured_paypal_merchant(tmp_path, monkeypatch):
+    configure_test_mapping(monkeypatch)
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(
+        app, token, paypal_merchant_override="ATTACKER-MERCHANT-OVERRIDE",
+    )
+    assert status == 422
+    assert b"ATTACKER-MERCHANT-OVERRIDE" not in body
+    assert Ledger(db_path).get("screen-tx-1") is None
+    schema = app.openapi()["components"]["schemas"]["TransactionScreenRequest"]["properties"]
+    assert "paypal_merchant_id" not in schema
+
+
+def test_review_disabled_when_configuration_missing_and_rejects_wrong_credential(tmp_path, monkeypatch):
+    clear_test_reviewer(monkeypatch)
+    app, token, _ = local_screening_app(tmp_path, amount="50.00", risk_scorer_marker=None)
+    submit_local_screening(app, token, transaction_id="review-auth", idempotency_key="review-auth-key", amount="50.00")
+    status, _, _ = submit_review(app, "review-auth")
+    assert status == 503
+
+    configure_test_reviewer(monkeypatch)
+    app, token, _ = local_screening_app(tmp_path / "configured", amount="50.00", risk_scorer_marker=None)
+    submit_local_screening(app, token, transaction_id="review-auth2", idempotency_key="review-auth-key2", amount="50.00")
+    status, _, body = submit_review(app, "review-auth2", credential="wrong-local-test-credential")
+    assert status == 401
+    assert b"wrong-local-test-credential" not in body
+
+
+def test_authenticated_hold_release_is_durable_idempotent_and_releases_reservation(tmp_path, monkeypatch):
+    configure_test_reviewer(monkeypatch)
+    app, token, db_path = local_screening_app(tmp_path, amount="50.00", risk_scorer_marker=None)
+    screen_status, _, screen_body = submit_local_screening(
+        app, token, transaction_id="review-release", idempotency_key="review-release-key", amount="50.00",
+    )
+    assert screen_status == 200 and json.loads(screen_body)["status"] == "HOLD"
+
+    from trustguard import TrustGuard
+    from paypal_rest import PayPalRestOrdersProvider
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("administrative review must never invoke provider dispatch")
+    monkeypatch.setattr(TrustGuard, "authorize_and_dispatch", forbidden)
+    monkeypatch.setattr(PayPalRestOrdersProvider, "create_order", forbidden)
+
+    first_status, _, first_body = submit_review(app, "review-release")
+    second_status, _, second_body = submit_review(app, "review-release")
+    first, second = json.loads(first_body), json.loads(second_body)
+    assert first_status == second_status == 200
+    assert first == second
+    assert first["decision"] == "RELEASE_RESERVATION"
+    assert first["transaction_state"] == "REVIEW_RELEASED"
+    assert first["reviewer_id"] == TEST_REVIEWER_ID
+    assert first["reason"] == "LOCAL TEST ONLY synthetic HOLD review"
+    assert TEST_REVIEWER_CREDENTIAL not in first_body.decode()
+    record = Ledger(db_path).get("review-release")
+    assert record["status"] == "REVIEW_RELEASED"
+    assert record["reviewer_id"] == TEST_REVIEWER_ID
+    assert record["review_decision"] == "RELEASE_RESERVATION"
+    assert record["review_reason"] == first["reason"]
+    assert record["reviewed_at"] == first["reviewed_at"]
+    with Ledger(db_path)._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM transaction_reviews WHERE transaction_id='review-release'").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM transactions WHERE grant_id=? AND status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','CREATED','APPROVED','COMPLETED','UNKNOWN')", (record["grant_id"],)).fetchone()[0] == 0
+
+    from trustguard import CanonicalTransaction
+    released_capacity_tx = CanonicalTransaction.build(
+        transaction_id="after-release", idempotency_key="after-release-key", amount="50.00",
+        currency="USD", skyfire_service_id=SERVICE_ID,
+    )
+    assert Ledger(db_path).reserve(record["grant_id"], released_capacity_tx, 5000, "USD") == "RESERVED"
+
+
+def _make_review_state(ledger, transaction_id, state, provider_order_id=None):
+    from trustguard import CanonicalTransaction
+    tx = CanonicalTransaction.build(
+        transaction_id=transaction_id, idempotency_key=f"{transaction_id}-idem",
+        amount="1.00", currency="USD", skyfire_service_id=SERVICE_ID,
+    )
+    ledger.reserve("review-state-grant", tx, 1000, "USD")
+    if state in {"DISPATCH_STARTED", "UNKNOWN", "CREATED"}:
+        ledger.transition(transaction_id, "DISPATCH_STARTED")
+        if state == "UNKNOWN":
+            ledger.transition(transaction_id, "UNKNOWN", provider_order_id)
+        elif state == "CREATED":
+            ledger.transition(transaction_id, "CREATED", provider_order_id or "ORDER-TEST")
+    elif state == "HOLD_WITH_ORDER":
+        with ledger._connect() as db:
+            db.execute("UPDATE transactions SET status='HOLD',provider_order_id='ORDER-TEST' WHERE transaction_id=?", (transaction_id,))
+    elif state == "HOLD":
+        with ledger._connect() as db:
+            db.execute("UPDATE transactions SET status='HOLD' WHERE transaction_id=?", (transaction_id,))
+
+
+@pytest.mark.parametrize("state", ["DISPATCH_STARTED", "UNKNOWN", "CREATED", "HOLD_WITH_ORDER"])
+def test_review_rejects_dispatched_unknown_or_provider_order_states(tmp_path, monkeypatch, state):
+    configure_test_reviewer(monkeypatch)
+    ledger = Ledger(tmp_path / f"review-{state}.sqlite")
+    transaction_id = f"state-{state}"
+    _make_review_state(ledger, transaction_id, state)
+    app = create_app(settings=settings(tmp_path), ledger=ledger, verifier=FakeVerifier({}))
+    status, _, _ = submit_review(app, transaction_id)
+    assert status == 409
+    assert ledger.get(transaction_id)["reviewer_id"] is None
+
+
+def test_review_rejects_conflicting_duplicate_and_audits_keep_hold(tmp_path, monkeypatch):
+    configure_test_reviewer(monkeypatch)
+    ledger = Ledger(tmp_path / "keep-hold.sqlite")
+    _make_review_state(ledger, "keep-hold", "HOLD")
+    app = create_app(settings=settings(tmp_path), ledger=ledger, verifier=FakeVerifier({}))
+    first = submit_review(app, "keep-hold", decision="KEEP_HOLD", reason="retain pending manual evidence")
+    duplicate = submit_review(app, "keep-hold", decision="KEEP_HOLD", reason="retain pending manual evidence")
+    conflict = submit_review(app, "keep-hold", decision="RELEASE_RESERVATION", reason="different choice")
+    assert first[0] == duplicate[0] == 200
+    assert json.loads(first[2]) == json.loads(duplicate[2])
+    assert conflict[0] == 409
+    record = ledger.get("keep-hold")
+    assert record["status"] == "HOLD"
+    assert record["review_decision"] == "KEEP_HOLD"
+    with ledger._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM transaction_reviews WHERE transaction_id='keep-hold'").fetchone()[0] == 1

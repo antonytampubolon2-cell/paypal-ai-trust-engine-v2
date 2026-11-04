@@ -287,16 +287,22 @@ def test_existing_order_created_ledger_migrates_to_created(tmp_path):
       CREATE TABLE transactions (
         transaction_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
         amount_minor INTEGER NOT NULL, currency TEXT NOT NULL, payee TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('RESERVED','DISPATCH_STARTED','UNKNOWN','ORDER_CREATED','FAILED')),
+        status TEXT NOT NULL CHECK(status IN ('RESERVED','SCREENED_ALLOW','HOLD','DISPATCH_STARTED','UNKNOWN','ORDER_CREATED','FAILED')),
         provider_order_id TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
       );
       CREATE INDEX tx_grant_status ON transactions(grant_id,status);
       CREATE TABLE replay_ids (kind TEXT NOT NULL,jti TEXT NOT NULL,expires_at REAL NOT NULL,PRIMARY KEY(kind,jti));
       INSERT INTO transactions VALUES('legacy-tx','grant','legacy-idem',5000,'USD','merchant-1','ORDER_CREATED','OLD-ORDER',1,1);
+      INSERT INTO transactions VALUES('old-screen-tx','skyfire:old-identity','old-screen-idem',500,'USD','seller-service-old','SCREENED_ALLOW',NULL,2,2);
     """)
     db.close()
     ledger = Ledger(path)
     assert ledger.get("legacy-tx")["status"] == "CREATED"
+    assert ledger.get("legacy-tx")["paypal_merchant_id"] == "merchant-1"
+    assert ledger.get("legacy-tx")["skyfire_service_id"] is None
+    assert ledger.get("old-screen-tx")["skyfire_service_id"] == "seller-service-old"
+    assert ledger.get("old-screen-tx")["paypal_merchant_id"] is None
+    assert ledger.get("old-screen-tx")["payee"] is None
     ledger.transition("legacy-tx", "APPROVED")
     assert ledger.get("legacy-tx")["status"] == "APPROVED"
 
