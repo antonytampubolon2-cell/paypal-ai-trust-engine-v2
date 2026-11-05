@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -92,6 +94,62 @@ class CountingScorer:
         return self.scorer.score(features)
 
 
+def _exercise_dpop_replay_guard(ledger):
+    """Exercise the existing DPoP verifier and durable replay-ID guard offline."""
+    from trustguard import Authenticator, SecurityError, TrustConfig, jwk_thumbprint
+
+    access_private = ec.generate_private_key(ec.SECP256R1())
+    proof_private = ec.generate_private_key(ec.SECP256R1())
+    proof_jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_private.public_key(), as_dict=True)
+    config = TrustConfig.from_values(
+        issuer="https://local-test-only.invalid",
+        audience="LOCAL-TEST-ONLY-RESOURCE",
+        trusted_keys={"LOCAL-TEST-ONLY-ACCESS-KEY": access_private.public_key()},
+        grant_id_field="gid", grant_limit_field="limit",
+        grant_currency_field="currency", grant_payees_field="payees",
+    )
+    authenticator = Authenticator(config)
+    proof_jti = "LOCAL-TEST-ONLY-REUSED-DPOP-JTI"
+    url = "https://local-test-only.invalid/transaction"
+    now = int(time.time())
+
+    def make_access(jti):
+        return jwt.encode({
+            "iss": config.issuer, "sub": "LOCAL-TEST-ONLY-AGENT", "aud": config.audience,
+            "iat": now - 1, "exp": now + 300, "jti": jti,
+            "delegation_grant": {"gid": "LOCAL-TEST-ONLY-GRANT", "limit": 10000,
+                                 "currency": "USD", "payees": ["LOCAL-TEST-ONLY-PAYEE"]},
+            "cnf": {"jkt": jwk_thumbprint(proof_jwk)},
+        }, access_private, algorithm="ES256", headers={"kid": "LOCAL-TEST-ONLY-ACCESS-KEY"})
+
+    def make_proof(access_token):
+        ath = base64.urlsafe_b64encode(hashlib.sha256(access_token.encode()).digest()).rstrip(b"=").decode()
+        return jwt.encode(
+            {"htm": "POST", "htu": url, "iat": now, "jti": proof_jti, "ath": ath},
+            proof_private, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": proof_jwk},
+        )
+
+    first_access = make_access("LOCAL-TEST-ONLY-ACCESS-1")
+    first_claims = authenticator.verify_access_token(first_access)
+    first_proof = make_proof(first_access)
+    first_proof_id = authenticator.verify_dpop(first_proof, first_claims, "POST", url, first_access)
+    ledger.claim_replay_id("access", first_claims["jti"], float(first_claims["exp"]))
+    ledger.claim_replay_id("dpop", first_proof_id, now + config.max_dpop_age_seconds)
+
+    # A fresh access token and correctly bound new proof reusing the proof jti
+    # reaches the durable DPoP replay check rather than failing ath validation.
+    second_access = make_access("LOCAL-TEST-ONLY-ACCESS-2")
+    second_claims = authenticator.verify_access_token(second_access)
+    second_proof = make_proof(second_access)
+    second_proof_id = authenticator.verify_dpop(second_proof, second_claims, "POST", url, second_access)
+    ledger.claim_replay_id("access", second_claims["jti"], float(second_claims["exp"]))
+    try:
+        ledger.claim_replay_id("dpop", second_proof_id, now + config.max_dpop_age_seconds)
+    except SecurityError:
+        return True
+    return False
+
+
 def run_demo():
     """Return non-sensitive scenario evidence. Temporary data is removed on exit."""
     from trustguard import Ledger, MockProvider, TrustGuard
@@ -154,8 +212,49 @@ def run_demo():
         low_payload = {"transaction_id": "LOCAL-TEST-ONLY-LOW", "idempotency_key": "LOCAL-TEST-ONLY-LOW-IDEM", "amount": "5.00", "currency": "USD"}
         high_payload = {"transaction_id": "LOCAL-TEST-ONLY-HIGH", "idempotency_key": "LOCAL-TEST-ONLY-HIGH-IDEM", "amount": "50.00", "currency": "USD"}
         screening_path = "/v1/agent/screen-transaction"
+        auth_status, auth_result = client.request(
+            "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": low_token},
+        )
+        assert auth_status == 200 and auth_result["valid"] is True
+        assert auth_result["paypal_payment_status"] == "NOT_STARTED"
+        assert auth_result["paypal_payment_authorized"] is False
         status, low = client.request("POST", screening_path, headers={"skyfire-pay-id": low_token}, payload=low_payload)
         assert status == 200 and low["status"] == "ALLOW" and scorer.calls == 1
+        invalid_token = "LOCAL-TEST-ONLY-INVALID-TOKEN"
+        invalid_status, invalid_result = client.request(
+            "POST", screening_path, headers={"skyfire-pay-id": invalid_token}, payload={
+                "transaction_id": "LOCAL-TEST-ONLY-INVALID-AUTH",
+                "idempotency_key": "LOCAL-TEST-ONLY-INVALID-AUTH-IDEM",
+                "amount": "5.00", "currency": "USD",
+            },
+        )
+        assert invalid_status == 401 and invalid_result == {"detail": "Skyfire token validation failed"}
+        assert ledger.get("LOCAL-TEST-ONLY-INVALID-AUTH") is None and scorer.calls == 1
+        replay_status, replayed_low = client.request(
+            "POST", screening_path, headers={"skyfire-pay-id": low_token}, payload=low_payload,
+        )
+        assert replay_status == 200 and replayed_low == low and scorer.calls == 1
+        cumulative_status, cumulative_result = client.request(
+            "POST", screening_path, headers={"skyfire-pay-id": low_token}, payload={
+                "transaction_id": "LOCAL-TEST-ONLY-CUMULATIVE-CAP",
+                "idempotency_key": "LOCAL-TEST-ONLY-CUMULATIVE-CAP-IDEM",
+                "amount": "46.00", "currency": "USD",
+            },
+        )
+        assert cumulative_status == 409
+        assert cumulative_result == {"detail": "transaction authorization, idempotency, or reservation rejected"}
+        assert ledger.get("LOCAL-TEST-ONLY-CUMULATIVE-CAP") is None and scorer.calls == 1
+        cap_status, cap_result = client.request(
+            "POST", screening_path, headers={"skyfire-pay-id": low_token}, payload={
+                "transaction_id": "LOCAL-TEST-ONLY-OVER-CAP",
+                "idempotency_key": "LOCAL-TEST-ONLY-OVER-CAP-IDEM",
+                "amount": "50.01", "currency": "USD",
+            },
+        )
+        assert cap_status == 403 and cap_result == {"detail": "transaction amount exceeds Skyfire authorization"}
+        assert ledger.get("LOCAL-TEST-ONLY-OVER-CAP") is None and scorer.calls == 1
+        dpop_replay_rejected = _exercise_dpop_replay_guard(ledger)
+        assert dpop_replay_rejected is True
         status, high = client.request("POST", screening_path, headers={"skyfire-pay-id": high_token}, payload=high_payload)
         assert status == 200 and high["status"] == "HOLD" and scorer.calls == 2
         assert low["paypal_integration_status"] == high["paypal_integration_status"] == "NOT_CONFIGURED"
@@ -212,12 +311,35 @@ def run_demo():
                 "risk_decision": result["status"], "anomaly_score": result["risk_assessment"]["anomaly_score"],
                 "model_version": result["risk_assessment"]["model_version"],
                 "durable_ledger_state": result["transaction_state"], "reason_code": result["reason_code"],
+                "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED",
             }
 
         return {
             "disclaimer": DISCLAIMER,
             "scenarios": [
+                {"scenario": "F — TOKEN AUTHORIZATION ONLY", "execution_label": "SIMULATED",
+                 "token_valid": auth_result["valid"], "paypal_payment_status": auth_result["paypal_payment_status"],
+                 "paypal_payment_authorized": auth_result["paypal_payment_authorized"], "payment_status": "NOT_DISPATCHED"},
                 summary("A — LOW RISK", low), summary("B — HIGH RISK", high),
+                {"scenario": "G — INVALID AUTHENTICATION", "http_status": invalid_status,
+                 "decision": "DENY", "risk_inference_run": False, "ledger_record_created": False,
+                 "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED"},
+                {"scenario": "H — IDENTICAL SCREENING REQUEST REPLAY", "http_status": replay_status,
+                 "risk_decision": replayed_low["status"], "same_response_returned": replayed_low == low,
+                 "no_second_inference": scorer.calls == 2, "semantics": "IDEMPOTENT_REPLAY_NOT_AUTH_FAILURE",
+                 "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED"},
+                {"scenario": "I — DPOP PROOF REPLAY", "decision": "DENY",
+                 "reused_proof_rejected": dpop_replay_rejected,
+                 "control": "DURABLE_REPLAY_ID_GUARD_IN_LEGACY_TRUSTGUARD_AUTH_FLOW",
+                 "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED"},
+                {"scenario": "J — AMOUNT ABOVE SIGNED AUTHORIZATION", "http_status": cap_status,
+                 "decision": "DENY", "reason": "REQUEST_EXCEEDS_SIGNED_AMOUNT_CLAIM",
+                 "ledger_record_created": False, "risk_inference_run": False,
+                 "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED"},
+                {"scenario": "K — CUMULATIVE GRANT LIMIT", "http_status": cumulative_status,
+                 "decision": "DENY", "reason": "ACTIVE_RESERVATIONS_EXCEED_AUTHORIZED_GRANT_LIMIT",
+                 "ledger_record_created": False, "risk_inference_run": False,
+                 "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED"},
                 {**summary("C — ADMIN REVIEW", high), "durable_ledger_state": high_record["status"],
                  "reviewer_decision": review["decision"], "reserved_minor_before": before, "reserved_minor_after": after,
                  "audit_persisted": True, "payment_authorized": False},
@@ -225,9 +347,12 @@ def run_demo():
                  "risk_decision": high_record["risk_decision"], "anomaly_score": high_record["anomaly_score"],
                  "model_version": high_record["risk_model_version"], "durable_ledger_state": high_record["status"],
                  "reviewer_decision": high_record["review_decision"], "restart_idempotency_verified": True,
-                 "transaction_count": 2, "audit_count": 1},
-                {"scenario": "E — PROVIDER SAFETY", "provider_invocation_count": spy.invocations,
-                 "external_network_attempt_count": spy.network_attempts, "paypal_dispatch": "DISABLED_NOT_CALLED"},
+                 "transaction_count": 2, "audit_count": 1, "execution_label": "SIMULATED",
+                 "payment_status": "NOT_DISPATCHED"},
+                {"scenario": "E — PROVIDER SAFETY", "execution_label": "SIMULATED",
+                 "provider_invocation_count": spy.invocations,
+                 "external_network_attempt_count": spy.network_attempts, "paypal_dispatch": "DISABLED_NOT_CALLED",
+                 "payment_status": "NOT_DISPATCHED"},
             ],
             "model_inference_count": scorer.calls,
             "http_routes_exercised": client.requests + restarted_client.requests,

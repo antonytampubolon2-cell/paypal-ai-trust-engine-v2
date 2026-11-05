@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "scripts" / "run_local_demo.py"
 
 
-def test_run_demo_exercises_real_http_routes_and_a_to_e_scenarios():
+def test_run_demo_exercises_real_http_routes_and_security_scenarios():
     report = run_demo()
     scenarios = {item["scenario"]: item for item in report["scenarios"]}
 
@@ -32,6 +32,48 @@ def test_run_demo_exercises_real_http_routes_and_a_to_e_scenarios():
     assert scenarios["A — LOW RISK"]["durable_ledger_state"] == "SCREENED_ALLOW"
     assert scenarios["B — HIGH RISK"]["risk_decision"] == "HOLD"
     assert scenarios["B — HIGH RISK"]["durable_ledger_state"] == "HOLD"
+
+    authorization = scenarios["F — TOKEN AUTHORIZATION ONLY"]
+    assert authorization["token_valid"] is True
+    assert authorization["paypal_payment_status"] == "NOT_STARTED"
+    assert authorization["paypal_payment_authorized"] is False
+    assert authorization["payment_status"] == "NOT_DISPATCHED"
+
+    invalid_auth = scenarios["G — INVALID AUTHENTICATION"]
+    assert invalid_auth["http_status"] == 401
+    assert invalid_auth["decision"] == "DENY"
+    assert invalid_auth["risk_inference_run"] is False
+    assert invalid_auth["ledger_record_created"] is False
+    assert invalid_auth["payment_status"] == "NOT_DISPATCHED"
+
+    screening_replay = scenarios["H — IDENTICAL SCREENING REQUEST REPLAY"]
+    assert screening_replay["http_status"] == 200
+    assert screening_replay["same_response_returned"] is True
+    assert screening_replay["no_second_inference"] is True
+    assert screening_replay["semantics"] == "IDEMPOTENT_REPLAY_NOT_AUTH_FAILURE"
+
+    dpop_replay = scenarios["I — DPOP PROOF REPLAY"]
+    assert dpop_replay["decision"] == "DENY"
+    assert dpop_replay["reused_proof_rejected"] is True
+    assert dpop_replay["control"] == "DURABLE_REPLAY_ID_GUARD_IN_LEGACY_TRUSTGUARD_AUTH_FLOW"
+
+    amount_cap = scenarios["J — AMOUNT ABOVE SIGNED AUTHORIZATION"]
+    assert amount_cap["http_status"] == 403
+    assert amount_cap["decision"] == "DENY"
+    assert amount_cap["ledger_record_created"] is False
+    assert amount_cap["risk_inference_run"] is False
+    assert amount_cap["payment_status"] == "NOT_DISPATCHED"
+
+    cumulative_cap = scenarios["K — CUMULATIVE GRANT LIMIT"]
+    assert cumulative_cap["http_status"] == 409
+    assert cumulative_cap["decision"] == "DENY"
+    assert cumulative_cap["ledger_record_created"] is False
+    assert cumulative_cap["risk_inference_run"] is False
+    assert cumulative_cap["payment_status"] == "NOT_DISPATCHED"
+
+    for item in report["scenarios"]:
+        assert item.get("execution_label") == "SIMULATED"
+        assert item.get("payment_status") == "NOT_DISPATCHED"
 
     review = scenarios["C — ADMIN REVIEW"]
     assert review["risk_decision"] == "HOLD"
@@ -59,6 +101,11 @@ def test_run_demo_exercises_real_http_routes_and_a_to_e_scenarios():
     assert report["disclaimer"] == DISCLAIMER
 
     assert report["http_routes_exercised"] == [
+        ("POST", "/v1/agent/authorize"),
+        ("POST", "/v1/agent/screen-transaction"),
+        ("POST", "/v1/agent/screen-transaction"),
+        ("POST", "/v1/agent/screen-transaction"),
+        ("POST", "/v1/agent/screen-transaction"),
         ("POST", "/v1/agent/screen-transaction"),
         ("POST", "/v1/agent/screen-transaction"),
         ("POST", "/v1/admin/transactions/LOCAL-TEST-ONLY-HIGH/review"),

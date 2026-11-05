@@ -218,7 +218,7 @@ pytest -q
 
 ### LOCAL TEST ONLY screening demonstration
 
-After installing `requirements.txt`, run the full offline A–E demonstration from the repository root with one command:
+After installing `requirements.txt`, run the full offline demonstration from the repository root with one command:
 
 ```bash
 python scripts/run_local_demo.py
@@ -228,19 +228,25 @@ Dependencies are the project's existing PyJWT/cryptography, FastAPI, requests, a
 
 The runner generates an ephemeral ES256 key and clearly synthetic Skyfire-like claims, injects a local public-only mock JWKS into the **unchanged** `SkyfireTokenVerifier`, and uses the actual FastAPI screening/review routes. It creates an isolated application with a temporary SQLite ledger and an ephemeral reviewer credential held only in memory. It clears ambient configuration for the duration of the run, explicitly disables PayPal dispatch, and restores the caller's environment afterwards. Provider spies and outbound-network guards are active throughout. No token, private key, settlement claim, or reviewer credential is printed or saved. The temporary database is removed after reopening it and verifying restart evidence.
 
-Output is JSON with a prominent `LOCAL TEST ONLY` disclaimer, scenario records, HTTP route names, an actual model-inference count, and provider/network counters. Expected scenario results with the current pinned model are:
+Output is JSON with a prominent `LOCAL TEST ONLY` disclaimer, scenario records, HTTP route names, an actual model-inference count, and provider/network counters. All scenario outcomes are labelled `SIMULATED`; payment status is always `NOT_DISPATCHED`. Expected scenario results with the current pinned model are:
 
 | Scenario | Transaction | Risk decision | Anomaly score (approximately) | Durable state / evidence |
 | --- | --- | --- | --- | --- |
-| A — low risk | `LOCAL-TEST-ONLY-LOW` | ALLOW | 0.415589 | `SCREENED_ALLOW` |
+| A — low risk | `LOCAL-TEST-ONLY-LOW` | ALLOW | 0.415589 | Valid simulated screening; `SCREENED_ALLOW` |
 | B — high risk | `LOCAL-TEST-ONLY-HIGH` | HOLD | 0.698450 | `HOLD`, `ANOMALY_THRESHOLD_EXCEEDED` |
-| C — review | `LOCAL-TEST-ONLY-HIGH` | remains HOLD | 0.698450 | `REVIEW_RELEASED`, `RELEASE_RESERVATION`; reserved minor units 5000 → 0 |
-| D — durability | both records | unchanged | unchanged | low-screen retry and review retry are idempotent; released-screen retry rejected; two transactions and one audit |
+| C — review | `LOCAL-TEST-ONLY-HIGH` | remains HOLD | 0.698450 | `REVIEW_RELEASED`, `RELEASE_RESERVATION`; reservation abandoned, not payment-approved |
+| D — durability | both records | unchanged | unchanged | restart persistence; identical screen request is idempotent; released transaction cannot be re-reserved |
 | E — provider safety | none | no payment authorization | n/a | provider invocations 0; external network attempts 0; `DISABLED_NOT_CALLED` |
+| F — token authorization only | no transaction | valid synthetic token | n/a | `NOT_STARTED`; PayPal payment authorization is false |
+| G — invalid authentication | synthetic invalid token | DENY / HTTP 401 | n/a | No ledger record or risk inference |
+| H — identical screen request replay | `LOCAL-TEST-ONLY-LOW` | same prior ALLOW result | unchanged | Idempotent response; no second inference or ledger transaction. Skyfire screening does not reject repeats solely by token `jti`. |
+| I — DPoP proof replay | synthetic proof | DENY | n/a | Durable DPoP replay-ID guard rejects a reused proof ID in the separate legacy TrustGuard auth flow |
+| J — amount above signed authorization | `LOCAL-TEST-ONLY-OVER-CAP` | DENY / HTTP 403 | n/a | Amount exceeds synthetic signed cap; no ledger record or risk inference |
+| K — cumulative grant limit | `LOCAL-TEST-ONLY-CUMULATIVE-CAP` | DENY / HTTP 409 | n/a | Existing active reservation plus requested amount would exceed the same verified grant; no row or inference |
 
 Both inferred results report model version `trustguard-isolation-forest-synthetic-v1`; inference count is exactly two (retries reuse persisted assessments). The low/high cases use separate clearly synthetic buyer identities so cumulative limits do not obscure the anomaly comparison. Review only abandons a reservation; it does not overturn the ML HOLD or approve a payment. Missing merchant mapping is truthfully reported as `NOT_CONFIGURED`.
 
-These locally signed tokens are **not genuine Skyfire-issued tokens**. The injected local JWKS trusts their key only inside this isolated test application; no production verifier configuration is changed. The model uses synthetic training data, not validated customer fraud data. No Skyfire or PayPal provider call occurs, no PayPal order IDs are fabricated, and this demonstration does **not** prove real Sandbox integration or payment success. Do not export demo tokens or keys into a production/Sandbox service.
+The DPoP replay case invokes the existing proof verifier and durable replay-ID ledger primitive directly; it is not part of the Skyfire Seller Service bearer-token endpoint. An identical Skyfire screening request is deliberately idempotent and may return its prior result; it is not described as a rejected token replay. These locally signed tokens are **not genuine Skyfire-issued tokens**. The injected local JWKS trusts their key only inside this isolated test application; no production verifier configuration is changed. The model uses synthetic training data, not validated customer fraud data. No Skyfire or PayPal provider call occurs, no PayPal order IDs are fabricated, and this demonstration does **not** prove real Sandbox integration or payment success. Do not export demo tokens or keys into a production/Sandbox service.
 
 Focused automated demo checks: `pytest -q tests/test_local_demo.py`. Existing route tests remain available with `pytest -q tests/test_skyfire_api.py -k 'local_test_only'`.
 
