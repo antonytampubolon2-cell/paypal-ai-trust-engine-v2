@@ -1,7 +1,11 @@
+import base64
 import concurrent.futures
+import hashlib
 import inspect
 import json
+import requests
 import sqlite3
+import socket
 import time
 from pathlib import Path
 
@@ -109,6 +113,108 @@ def test_dpop_persistent_replay_rejected(tmp_path):
     with pytest.raises(SecurityError):
         ledger.claim_replay_id("dpop", "same-jti", time.time() + 300)
     assert Ledger(tmp_path / "ledger.sqlite").get("missing") is None
+
+
+def test_authorize_and_dispatch_rejects_reused_dpop_jti_after_hold_and_restart(
+    tmp_path, config, signing_key, monkeypatch,
+):
+    """The complete legacy authorization path consumes and rejects a DPoP jti durably."""
+    path = tmp_path / "authorize-dispatch-dpop-replay.sqlite"
+    proof_key = ec.generate_private_key(ec.SECP256R1())
+    public_jwk = jwt.algorithms.ECAlgorithm.to_jwk(proof_key.public_key(), as_dict=True)
+    proof_jti = "integration-test-shared-dpop-proof-jti"
+    target = "https://merchant.example/pay"
+    provider_invocations = []
+    network_attempts = []
+    replay_claims = []
+
+    def forbidden_provider(*_args, **_kwargs):
+        provider_invocations.append("provider call attempted")
+        raise RuntimeError("provider invocation forbidden by this test")
+
+    def forbidden_network(*_args, **_kwargs):
+        network_attempts.append("network call attempted")
+        raise AssertionError("external network access forbidden by this test")
+
+    monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "false")
+    provider = MockProvider()
+    monkeypatch.setattr(provider, "create_order", forbidden_provider)
+    monkeypatch.setattr(provider, "get_order_details", forbidden_provider)
+    monkeypatch.setattr(requests.sessions.Session, "request", forbidden_network)
+    monkeypatch.setattr(socket, "create_connection", forbidden_network)
+
+    scorer = FixedRiskScorer(score=0.99, decision="HOLD")
+    first_ledger = Ledger(path)
+    original_claim = first_ledger.claim_replay_id
+
+    def track_first_claim(kind, jti, expires_at, *args, **kwargs):
+        replay_claims.append((kind, jti))
+        return original_claim(kind, jti, expires_at, *args, **kwargs)
+
+    monkeypatch.setattr(first_ledger, "claim_replay_id", track_first_claim)
+    first_guard = TrustGuard(config, first_ledger, provider, risk_scorer=scorer)
+    first_access = access_token(signing_key, cnf={"jkt": jwk_thumbprint(public_jwk)}, jti="integration-access-1")
+    first_proof = proof_token(proof_key, public_jwk, first_access, url=target, jti=proof_jti)
+
+    first_result = first_guard.authorize_and_dispatch(
+        first_access, first_proof, "POST", target,
+        tx("integration-held-transaction", "integration-held-idempotency", "10.00"),
+    )
+    assert first_result["status"] == "HOLD"
+    assert first_result["risk_assessment"]["decision"] == "HOLD"
+    assert first_ledger.get("integration-held-transaction")["status"] == "HOLD"
+    assert replay_claims == [("access", "integration-access-1"), ("dpop", proof_jti)]
+
+    def persisted_replay_rows(database_path):
+        with sqlite3.connect(database_path) as db:
+            return set(db.execute("SELECT kind,jti FROM replay_ids").fetchall())
+
+    assert persisted_replay_rows(path) == {
+        ("access", "integration-access-1"), ("dpop", proof_jti),
+    }
+
+    # Reopen the SQLite ledger to prove the first proof ID survives a persistence boundary.
+    second_ledger = Ledger(path)
+    assert second_ledger.get("integration-held-transaction")["status"] == "HOLD"
+    assert persisted_replay_rows(path) == {
+        ("access", "integration-access-1"), ("dpop", proof_jti),
+    }
+    second_original_claim = second_ledger.claim_replay_id
+
+    def track_second_claim(kind, jti, expires_at, *args, **kwargs):
+        replay_claims.append((kind, jti))
+        return second_original_claim(kind, jti, expires_at, *args, **kwargs)
+
+    monkeypatch.setattr(second_ledger, "claim_replay_id", track_second_claim)
+    second_guard = TrustGuard(config, second_ledger, provider, risk_scorer=scorer)
+    second_access = access_token(
+        signing_key, cnf={"jkt": jwk_thumbprint(public_jwk)}, jti="integration-access-2",
+    )
+    # New proof serialization, same proof key and jti, but ath correctly binds the fresh token.
+    second_proof = proof_token(proof_key, public_jwk, second_access, url=target, jti=proof_jti)
+    second_proof_claims = jwt.decode(second_proof, options={"verify_signature": False})
+    expected_ath = base64.urlsafe_b64encode(hashlib.sha256(second_access.encode()).digest()).rstrip(b"=").decode()
+    assert second_proof_claims["ath"] == expected_ath
+    assert second_proof_claims["jti"] == proof_jti
+
+    with pytest.raises(SecurityError, match=r"^replayed identifier$"):
+        second_guard.authorize_and_dispatch(
+            second_access, second_proof, "POST", target,
+            tx("integration-replay-transaction", "integration-replay-idempotency", "10.00"),
+        )
+
+    assert replay_claims == [
+        ("access", "integration-access-1"), ("dpop", proof_jti),
+        ("access", "integration-access-2"), ("dpop", proof_jti),
+    ]
+    assert scorer.calls and len(scorer.calls) == 1
+    assert second_ledger.get("integration-replay-transaction") is None
+    assert persisted_replay_rows(path) == {
+        ("access", "integration-access-1"), ("access", "integration-access-2"),
+        ("dpop", proof_jti),
+    }
+    assert provider_invocations == []
+    assert network_attempts == []
 
 
 def test_dpop_replay_concurrent_insert_allows_only_one(tmp_path):
