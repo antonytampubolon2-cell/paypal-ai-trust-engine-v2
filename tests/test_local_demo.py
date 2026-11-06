@@ -157,6 +157,9 @@ def test_production_skyfire_verifier_rejects_independently_signed_token_and_is_n
         "LOCAL-TEST-ONLY-SELLER",
         "LOCAL-TEST-ONLY-SERVICE",
         str(tmp_path / "verifier.sqlite3"),
+        protocol_profile="ietf-draft-2026-11",
+        expected_audience="LOCAL-TEST-ONLY-SELLER",
+        account_configuration_confirmed=True,
     )
     verifier_method = SkyfireTokenVerifier.verify
     verifier = SkyfireTokenVerifier(settings, jwks_fetcher=lambda: {"keys": [trusted_jwk]})

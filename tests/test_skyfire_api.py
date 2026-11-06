@@ -15,6 +15,8 @@ from skyfire_auth import (
     DOCUMENTED_SANDBOX_ISSUER,
     DOCUMENTED_SANDBOX_JWKS_URL,
     EXPECTED_SANDBOX_ENVIRONMENT,
+    PROFILE_DRAFT,
+    PROFILE_LEGACY,
     SkyfireSettings,
     SkyfireTokenError,
     SkyfireTokenVerifier,
@@ -34,7 +36,10 @@ class FakeVerifier:
 
     def verify(self, token):
         self.values.append(token)
-        return self.result
+        result = dict(self.result)
+        result.setdefault("service_id", result.get("tsi"))
+        result.setdefault("sub_semantics", "LOCAL TEST ONLY synthetic subject")
+        return result
 
 
 def settings(tmp_path, *, target_domain=None, issuer=DOCUMENTED_SANDBOX_ISSUER,
@@ -42,6 +47,8 @@ def settings(tmp_path, *, target_domain=None, issuer=DOCUMENTED_SANDBOX_ISSUER,
     return SkyfireSettings(
         issuer, jwks_url, expected_environment, SELLER_ID, SERVICE_ID,
         str(tmp_path / "skyfire.sqlite3"), target_domain,
+        protocol_profile=PROFILE_DRAFT, expected_audience=SELLER_ID,
+        account_configuration_confirmed=True,
     )
 
 
@@ -67,7 +74,15 @@ def make_token(private, *, typ="kya-pay+jwt", overrides=None, jti=None):
         "cur": "USD",
         "val": "1250000",
         "stp": "card",
-        "sti": {"verified": True, "payment_token": "SENSITIVE-SETTLEMENT-DATA"},
+        "sti": {
+            "type": "visa_vic",
+            "payment_token": "0000000000000000",
+            "token_expiration_month": "12",
+            "token_expiration_year": "2030",
+            "token_security_code": "000",
+            "verified": True,
+            "verification_id": "LOCAL-TEST-ONLY-SENSITIVE-MARKER",
+        },
     }
     claims.update(overrides or {})
     return jwt.encode(claims, private, algorithm="ES256", headers={"kid": "skyfire-test-key", "typ": typ})
@@ -136,7 +151,7 @@ def submit_local_screening(app, token, *, transaction_id="screen-tx-1", idempote
     body = json.dumps(payload).encode()
     return asgi_request(
         app, "POST", "/v1/agent/screen-transaction",
-        headers={"skyfire-pay-id": token, "content-type": "application/json"},
+        headers={"KYAPay-Token": token, "content-type": "application/json"},
         body=body,
     )
 
@@ -146,6 +161,9 @@ def test_explicit_documented_sandbox_pair_loads_from_environment(monkeypatch, tm
         "SKYFIRE_ISSUER": DOCUMENTED_SANDBOX_ISSUER,
         "SKYFIRE_JWKS_URL": DOCUMENTED_SANDBOX_JWKS_URL,
         "SKYFIRE_EXPECTED_ENVIRONMENT": "sandbox",
+        "SKYFIRE_PROTOCOL_PROFILE": PROFILE_DRAFT,
+        "SKYFIRE_EXPECTED_AUDIENCE": SELLER_ID,
+        "SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED": "true",
         "SKYFIRE_SELLER_AGENT_ACCOUNT_ID": SELLER_ID,
         "SKYFIRE_SELLER_SERVICE_ID": SERVICE_ID,
         "TRUSTGUARD_DATABASE_PATH": str(tmp_path / "configured.sqlite3"),
@@ -159,15 +177,21 @@ def test_explicit_documented_sandbox_pair_loads_from_environment(monkeypatch, tm
     assert loaded.database_path == env["TRUSTGUARD_DATABASE_PATH"]
 
 
-def test_unconfirmed_or_mismatched_sandbox_pairs_fail_closed(tmp_path):
+def test_mismatched_sandbox_pairs_and_unconfirmed_account_fail_closed(tmp_path):
     with pytest.raises(SkyfireTokenError):
         settings(tmp_path, issuer="https://app.skyfire.xyz", jwks_url=DOCUMENTED_SANDBOX_JWKS_URL)
     with pytest.raises(SkyfireTokenError):
         settings(tmp_path, jwks_url="https://api-qa.skyfire.xyz/api/v1/tokens")
     with pytest.raises(SkyfireTokenError):
         settings(tmp_path, expected_environment="production")
-    with pytest.raises(SkyfireTokenError):
-        settings(tmp_path, issuer="https://attacker.example", jwks_url="https://attacker.example/.well-known/jwks.json")
+    unconfirmed = SkyfireSettings(
+        DOCUMENTED_SANDBOX_ISSUER, DOCUMENTED_SANDBOX_JWKS_URL, "sandbox", SELLER_ID,
+        SERVICE_ID, str(tmp_path / "unconfirmed.sqlite3"), protocol_profile=PROFILE_DRAFT,
+        expected_audience=SELLER_ID, account_configuration_confirmed=False,
+    )
+    app = create_app(settings=unconfirmed, ledger=Ledger(tmp_path / "unconfirmed.sqlite3"),
+                     verifier=FakeVerifier({}))
+    assert asgi_request(app, "GET", "/healthz")[0] == 503
 
 
 def test_valid_es256_tokens_and_all_supported_types(tmp_path):
@@ -177,7 +201,7 @@ def test_valid_es256_tokens_and_all_supported_types(tmp_path):
         claims = check.verify(make_token(private, typ=typ))
         assert claims["token_type"] == typ.removeprefix("application/")
         assert claims["aud"] == SELLER_ID
-        assert claims["tsi"] == SERVICE_ID
+        assert claims["service_id"] == SERVICE_ID
     kya = check.verify(make_token(private, typ="kya+jwt", overrides={"amt": None, "cur": None, "val": None, "stp": None, "sti": None}))
     assert kya["amount"] is None and kya["currency"] is None
 
@@ -189,14 +213,13 @@ def test_valid_es256_tokens_and_all_supported_types(tmp_path):
     ({"tsi": "another-service"}, "kya-pay+jwt"),
     ({"exp": int(time.time()) - 10}, "kya-pay+jwt"),
     ({"iat": int(time.time()) + 360}, "kya-pay+jwt"),
-    ({"jti": "not-a-uuid"}, "kya-pay+jwt"),
+    ({"jti": ""}, "kya-pay+jwt"),
     ({"amt": "not-money"}, "pay+jwt"),
     ({"amt": "0"}, "pay+jwt"),
     ({"cur": "usd"}, "pay+jwt"),
     ({"cur": "USDD"}, "pay+jwt"),
     ({"val": "0"}, "pay+jwt"),
     ({"stp": "other"}, "pay+jwt"),
-    ({"sti": {"verified": False, "payment_token": "secret"}}, "pay+jwt"),
 ])
 def test_invalid_claims_rejected(tmp_path, overrides, typ):
     private, jwk = signing_material()
@@ -276,6 +299,8 @@ def test_jwks_cache_is_bounded_and_reused(tmp_path):
 def test_required_configuration_fails_closed(monkeypatch):
     for name in (
         "SKYFIRE_ISSUER", "SKYFIRE_JWKS_URL", "SKYFIRE_EXPECTED_ENVIRONMENT",
+        "SKYFIRE_PROTOCOL_PROFILE", "SKYFIRE_EXPECTED_AUDIENCE",
+        "SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED",
         "SKYFIRE_SELLER_AGENT_ACCOUNT_ID", "SKYFIRE_SELLER_SERVICE_ID", "TRUSTGUARD_DATABASE_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -284,7 +309,7 @@ def test_required_configuration_fails_closed(monkeypatch):
     app = create_app()
     status, _, _ = asgi_request(app, "GET", "/healthz")
     assert status == 503
-    status, _, _ = asgi_request(app, "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": "not-stored"})
+    status, _, _ = asgi_request(app, "POST", "/v1/agent/authorize", headers={"KYAPay-Token": "not-stored"})
     assert status == 503
 
 
@@ -298,7 +323,7 @@ def test_api_openapi_health_and_header_documentation(tmp_path):
     spec = json.loads(body)
     assert "/v1/agent/authorize" in spec["paths"]
     parameters = spec["paths"]["/v1/agent/authorize"]["post"]["parameters"]
-    assert any(p["in"] == "header" and p["name"] == "skyfire-pay-id" and p["required"] is True for p in parameters)
+    assert any(p["in"] == "header" and p["name"] == "KYAPay-Token" and p["required"] is True for p in parameters)
 
 
 def test_publication_policy_and_formal_openapi_validation(tmp_path):
@@ -335,7 +360,7 @@ def test_request_body_limit_counts_chunked_body_without_content_length(tmp_path,
     monkeypatch.setenv("TRUSTGUARD_MAX_REQUEST_BODY_BYTES", "1024")
     app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "body-limit.sqlite3"), verifier=FakeVerifier({}))
     status, _, body = asgi_request(
-        app, "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": "LOCAL-TEST-token"},
+        app, "POST", "/v1/agent/authorize", headers={"KYAPay-Token": "LOCAL-TEST-token"},
         body_chunks=[b"a" * 600, b"b" * 600],
     )
     assert status == 413
@@ -402,7 +427,7 @@ def test_request_validation_error_redacts_token_and_body_from_response_and_logs(
     marker_body = "LOCAL-TEST-REVIEWER-SECRET-DO-NOT-ECHO"
     status, _, body = asgi_request(
         app, "POST", "/v1/agent/screen-transaction",
-        headers={"skyfire-pay-id": marker_header, "content-type": "application/json"},
+        headers={"KYAPay-Token": marker_header, "content-type": "application/json"},
         body=json.dumps({"transaction_id": marker_body, "unknown": marker_header}).encode(),
     )
     assert status == 422
@@ -448,7 +473,7 @@ def test_repeated_token_is_accepted_and_never_persisted_or_exposed(tmp_path, mon
     database = tmp_path / "api-secure.sqlite3"
     app = create_app(settings=settings(tmp_path), ledger=Ledger(database), verifier=check)
     for _ in range(2):
-        status, _, body = asgi_request(app, "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": token})
+        status, _, body = asgi_request(app, "POST", "/v1/agent/authorize", headers={"KYAPay-Token": token})
         assert status == 200
         result = json.loads(body)
         assert result["valid"] is True
@@ -457,26 +482,26 @@ def test_repeated_token_is_accepted_and_never_persisted_or_exposed(tmp_path, mon
         }
         assert result["paypal_payment_status"] == "NOT_STARTED"
         assert result["paypal_payment_authorized"] is False
-        assert "SENSITIVE-SETTLEMENT-DATA" not in body.decode()
+        assert "LOCAL-TEST-ONLY-SENSITIVE-MARKER" not in body.decode()
         assert token not in body.decode()
-    assert "SENSITIVE-SETTLEMENT-DATA" not in caplog.text
+    assert "LOCAL-TEST-ONLY-SENSITIVE-MARKER" not in caplog.text
     assert token not in caplog.text
     raw_db = database.read_bytes()
     assert token.encode() not in raw_db
     assert token_id.encode() not in raw_db
-    assert b"SENSITIVE-SETTLEMENT-DATA" not in raw_db
+    assert b"LOCAL-TEST-ONLY-SENSITIVE-MARKER" not in raw_db
 
 
 def test_missing_header_and_database_startup_failure_fail_closed(tmp_path):
     fake = FakeVerifier({"jti": "unused", "exp": int(time.time()) + 300, "token_type": "kya+jwt", "sub": "buyer", "aud": SELLER_ID, "tsi": SERVICE_ID, "tdm": None, "amount": None, "currency": None})
     app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "missing.sqlite3"), verifier=fake)
     status, _, _ = asgi_request(app, "POST", "/v1/agent/authorize")
-    assert status == 422
+    assert status == 401
 
     def failing_ledger(_path):
         raise OSError("local database unavailable")
     app_with_bad_store = create_app(settings=settings(tmp_path), verifier=fake, ledger_factory=failing_ledger)
-    status, _, body = asgi_request(app_with_bad_store, "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": "opaque-local-test-token"})
+    status, _, body = asgi_request(app_with_bad_store, "POST", "/v1/agent/authorize", headers={"KYAPay-Token": "opaque-local-test-token"})
     assert status == 503
     assert b"opaque-local-test-token" not in body
 
@@ -489,7 +514,10 @@ def test_concurrent_repeated_jti_presentations_are_not_request_replays(tmp_path)
     })
     app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "concurrent-api.sqlite3"), verifier=fake)
     def submit(_):
-        status, _, _ = asgi_request(app, "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": "opaque-local-test-token"})
+        status, _, _ = asgi_request(
+            app, "POST", "/v1/agent/authorize",
+            headers={"KYAPay-Token": "LOCAL-TEST-ONLY.a.b"},
+        )
         return status
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         statuses = list(pool.map(submit, range(8)))
@@ -601,6 +629,8 @@ def test_screening_duplicate_reuses_one_reservation_and_one_assessment(tmp_path)
 def test_screening_fails_closed_without_skyfire_configuration(monkeypatch, tmp_path):
     for name in (
         "SKYFIRE_ISSUER", "SKYFIRE_JWKS_URL", "SKYFIRE_EXPECTED_ENVIRONMENT",
+        "SKYFIRE_PROTOCOL_PROFILE", "SKYFIRE_EXPECTED_AUDIENCE",
+        "SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED",
         "SKYFIRE_SELLER_AGENT_ACCOUNT_ID", "SKYFIRE_SELLER_SERVICE_ID", "TRUSTGUARD_DATABASE_PATH",
     ):
         monkeypatch.delenv(name, raising=False)

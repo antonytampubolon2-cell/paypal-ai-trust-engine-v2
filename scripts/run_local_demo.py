@@ -156,7 +156,7 @@ def run_demo():
     from paypal_rest import PayPalRestOrdersProvider
     from skyfire_auth import (
         DOCUMENTED_SANDBOX_ISSUER, DOCUMENTED_SANDBOX_JWKS_URL,
-        SkyfireSettings, SkyfireTokenVerifier,
+        PROFILE_DRAFT, SkyfireSettings, SkyfireTokenVerifier,
     )
     from risk_scoring import SyntheticIsolationForestScorer
 
@@ -180,6 +180,9 @@ def run_demo():
         settings = SkyfireSettings(
             DOCUMENTED_SANDBOX_ISSUER, DOCUMENTED_SANDBOX_JWKS_URL, "sandbox",
             "LOCAL-TEST-ONLY-SELLER", "LOCAL-TEST-ONLY-SERVICE", str(path),
+            protocol_profile=PROFILE_DRAFT,
+            expected_audience="LOCAL-TEST-ONLY-SELLER",
+            account_configuration_confirmed=True,
         )
         private = ec.generate_private_key(ec.SECP256R1())
         public_jwk = jwt.algorithms.ECAlgorithm.to_jwk(private.public_key(), as_dict=True)
@@ -205,7 +208,13 @@ def run_demo():
                 "tsi": settings.seller_service_id, "sub": subject, "env": "sandbox",
                 "iat": now - 5, "exp": now + 600, "jti": str(uuid.uuid4()),
                 "amt": "50.00", "cur": "USD", "val": "50000000", "stp": "card",
-                "sti": {"verified": True, "payment_token": "LOCAL-TEST-ONLY-NOT-SETTLEMENT"},
+                "tps": "pay_per_use", "tpr": "1.00", "mnr": 50,
+                "sti": {
+                    "type": "visa_vic", "payment_token": "0000000000000000",
+                    "token_expiration_month": "12", "token_expiration_year": "2030",
+                    "token_security_code": "000", "verified": True,
+                    "verification_id": "LOCAL-TEST-ONLY-SENSITIVE-MARKER",
+                },
             }, private, algorithm="ES256", headers={"kid": public_jwk["kid"], "typ": "kya-pay+jwt"})
 
         ledger = Ledger(path)
@@ -216,16 +225,16 @@ def run_demo():
         high_payload = {"transaction_id": "LOCAL-TEST-ONLY-HIGH", "idempotency_key": "LOCAL-TEST-ONLY-HIGH-IDEM", "amount": "50.00", "currency": "USD"}
         screening_path = "/v1/agent/screen-transaction"
         auth_status, auth_result = client.request(
-            "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": low_token},
+            "POST", "/v1/agent/authorize", headers={"KYAPay-Token": low_token},
         )
         assert auth_status == 200 and auth_result["valid"] is True
         assert auth_result["paypal_payment_status"] == "NOT_STARTED"
         assert auth_result["paypal_payment_authorized"] is False
-        status, low = client.request("POST", screening_path, headers={"skyfire-pay-id": low_token}, payload=low_payload)
+        status, low = client.request("POST", screening_path, headers={"KYAPay-Token": low_token}, payload=low_payload)
         assert status == 200 and low["status"] == "ALLOW" and scorer.calls == 1
         invalid_token = "LOCAL-TEST-ONLY-INVALID-TOKEN"
         invalid_status, invalid_result = client.request(
-            "POST", screening_path, headers={"skyfire-pay-id": invalid_token}, payload={
+            "POST", screening_path, headers={"KYAPay-Token": invalid_token}, payload={
                 "transaction_id": "LOCAL-TEST-ONLY-INVALID-AUTH",
                 "idempotency_key": "LOCAL-TEST-ONLY-INVALID-AUTH-IDEM",
                 "amount": "5.00", "currency": "USD",
@@ -234,11 +243,11 @@ def run_demo():
         assert invalid_status == 401 and invalid_result == {"detail": "Skyfire token validation failed"}
         assert ledger.get("LOCAL-TEST-ONLY-INVALID-AUTH") is None and scorer.calls == 1
         replay_status, replayed_low = client.request(
-            "POST", screening_path, headers={"skyfire-pay-id": low_token}, payload=low_payload,
+            "POST", screening_path, headers={"KYAPay-Token": low_token}, payload=low_payload,
         )
         assert replay_status == 200 and replayed_low == low and scorer.calls == 1
         cumulative_status, cumulative_result = client.request(
-            "POST", screening_path, headers={"skyfire-pay-id": low_token}, payload={
+            "POST", screening_path, headers={"KYAPay-Token": low_token}, payload={
                 "transaction_id": "LOCAL-TEST-ONLY-CUMULATIVE-CAP",
                 "idempotency_key": "LOCAL-TEST-ONLY-CUMULATIVE-CAP-IDEM",
                 "amount": "46.00", "currency": "USD",
@@ -248,7 +257,7 @@ def run_demo():
         assert cumulative_result == {"detail": "transaction authorization, idempotency, or reservation rejected"}
         assert ledger.get("LOCAL-TEST-ONLY-CUMULATIVE-CAP") is None and scorer.calls == 1
         cap_status, cap_result = client.request(
-            "POST", screening_path, headers={"skyfire-pay-id": low_token}, payload={
+            "POST", screening_path, headers={"KYAPay-Token": low_token}, payload={
                 "transaction_id": "LOCAL-TEST-ONLY-OVER-CAP",
                 "idempotency_key": "LOCAL-TEST-ONLY-OVER-CAP-IDEM",
                 "amount": "50.01", "currency": "USD",
@@ -258,7 +267,7 @@ def run_demo():
         assert ledger.get("LOCAL-TEST-ONLY-OVER-CAP") is None and scorer.calls == 1
         dpop_replay_rejected = _exercise_dpop_replay_guard(ledger)
         assert dpop_replay_rejected is True
-        status, high = client.request("POST", screening_path, headers={"skyfire-pay-id": high_token}, payload=high_payload)
+        status, high = client.request("POST", screening_path, headers={"KYAPay-Token": high_token}, payload=high_payload)
         assert status == 200 and high["status"] == "HOLD" and scorer.calls == 2
         assert low["paypal_integration_status"] == high["paypal_integration_status"] == "NOT_CONFIGURED"
 
@@ -293,11 +302,11 @@ def run_demo():
             assert record["anomaly_score"] == result["risk_assessment"]["anomaly_score"]
             assert record["risk_model_version"] == result["risk_assessment"]["model_version"]
         restarted_client = LocalASGITestClient(application(reopened))
-        status, low_retry = restarted_client.request("POST", screening_path, headers={"skyfire-pay-id": low_token}, payload=low_payload)
+        status, low_retry = restarted_client.request("POST", screening_path, headers={"KYAPay-Token": low_token}, payload=low_payload)
         assert status == 200 and low_retry == low and scorer.calls == 2
         status, review_retry = restarted_client.request("POST", review_path, headers={"x-trustguard-reviewer-credential": reviewer_credential}, payload=review_payload)
         assert status == 200 and review_retry == review
-        status, _ = restarted_client.request("POST", screening_path, headers={"skyfire-pay-id": high_token}, payload=high_payload)
+        status, _ = restarted_client.request("POST", screening_path, headers={"KYAPay-Token": high_token}, payload=high_payload)
         assert status == 409  # Released transactions stay terminal; never re-reserved.
         db = reopened._connect()
         try:

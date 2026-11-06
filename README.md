@@ -4,19 +4,23 @@ This repository includes a FastAPI service for validating Skyfire KYAPay tokens.
 
 **Demo limitation:** no actual Skyfire-issued Sandbox token has been verified by this project, and no PayPal Sandbox order/capture success is claimed or shown. Tests use generated tokens and mock provider responses only. Confirm Skyfire onboarding metadata before accepting real tokens.
 
-The API accepts `skyfire-pay-id` as requested. Skyfire currently documents `kyapay-token` as preferred and `skyfire-pay-id` as deprecated; this service retains the latter for compatibility. [Skyfire Seller Services](https://docs.skyfire.xyz/docs/seller-services)
+The previous implementation mixed `skyfire-pay-id` transport with draft-generation `tsi` claims. The API now requires one explicit `SKYFIRE_PROTOCOL_PROFILE` and never falls back between profiles: `legacy-published` uses exactly one `skyfire-pay-id` JWT with `ssi`; `ietf-draft-2026-11` uses the November 2026 working-draft `KYAPay-Token` Structured Field List with `tsi`. The latter is an Internet-Draft, not a finalized standard. Both profiles require separately configured trusted issuer/JWKS, audience, Sandbox environment, and Seller Service binding. No actual account has been confirmed for either profile, so neither is approved for this Seller Service.
+
+For the published profile, `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, `env`, and `ssi` are required; the audience is configured to the Seller Agent Account ID, and published `sub`/`jti` UUID requirements are enforced. For the draft, common `iss`, `sub`, `aud`, `iat`, `exp`, `jti` and `tsi` are required; `env` is optional in draft -03, but if present must match the configured Sandbox. Draft `aud` must be configured as the exact Target identity audience, not assumed to be a Seller Agent Account ID. Both profiles enforce ES256, `kid`, a fixed configured HTTPS issuer/JWKS origin, exact audience and target-service binding. Payment profiles validate positive decimal-string `amt` and `val`, a three-letter currency, and profile-appropriate settlement metadata; the draft additionally validates supported `tps`, `tpr`, `mnr`, and `sti` shapes. The API does not return or store `sti` or `val`. Draft list parsing accepts members of at least 6144 octets, rejects malformed lists as a whole, and the current screening API intentionally accepts exactly one token per operation. Token-dependent responses include `Vary` and `Cache-Control: private, no-store`.
+
+`SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED` defaults to false. The API remains unready until the operator has confirmed the actual Seller Service and its profile-specific configuration from authoritative Skyfire Dashboard/support evidence, then explicitly sets this flag to `true`. Individual identity/KYA verification does not create or approve a Seller Service. Never use synthetic test values in this setting.
 
 ## HTTP endpoints
 
 - `GET /healthz`: `200` when the required configuration and durable SQLite ledger are ready; otherwise `503`.
-- `GET /openapi.json`: generated OpenAPI document only when `TRUSTGUARD_OPENAPI_ENABLED=true`; publication is disabled by default. Its configured path defaults to `/openapi.json` and may be changed with `TRUSTGUARD_OPENAPI_PATH`. Interactive `/docs` and `/redoc` are disabled. No public server URL is embedded. The current header/claim contract is unresolved for the actual Skyfire account; do not treat this schema as approved interoperability.
+- `GET /openapi.json`: generated OpenAPI document only when `TRUSTGUARD_OPENAPI_ENABLED=true` and an explicit profile is configured; the profile's sole expected header is documented. Publication is disabled by default, and disabled entirely when the profile is absent. Its path defaults to `/openapi.json` and may be changed with `TRUSTGUARD_OPENAPI_PATH`. Interactive `/docs` and `/redoc` are disabled. No public server URL is embedded. A schema generated for a selected candidate is not evidence of account approval.
 - `POST /v1/agent/authorize`: validates the signed token and returns a minimized claim projection. The response explicitly says `paypal_payment_status: NOT_STARTED` and `paypal_payment_authorized: false`.
 - `POST /v1/agent/screen-transaction`: requires a valid Skyfire PAY/KYA-PAY token, validates a canonical request, durably reserves it against an identity derived from verified token claims, and invokes the existing local IsolationForest scorer. It returns `ALLOW` or `HOLD`, a reason code, and persisted model metadata. This route has no provider dependency and never creates or captures a PayPal order.
 - `POST /v1/admin/transactions/{transaction_id}/review`: when separately configured, records `KEEP_HOLD` or `RELEASE_RESERVATION` with a review reason. Release marks only a still-undispatched HOLD as `REVIEW_RELEASED`; it does not authorize payment.
 
-The API does not use `jti` as a request id or one-use replay key. The verifier requires a UUID-format `jti` as the token identifier, but repeated presentation of the same valid token is permitted until its expiration. The API does not persist `jti`, the raw token, or `sti`. A repeated token is not itself a second PayPal operation: actual dispatch de-duplication remains tied to TrustGuard's separate canonical application `transaction_id` and `idempotency_key`, recorded atomically by its SQLite ledger. The `/v1/agent/authorize` endpoint itself initiates no payment operation. The separate legacy TrustGuard DPoP/access-token path retains its own replay checks; it is not used by this Skyfire endpoint.
+The API does not use `jti` as a request id or one-use replay key. The published profile requires UUID-form `sub`/`jti` according to Skyfire's published example; the November draft treats `jti` as a token identifier and permits a token to be reused during its validity. Neither profile rejects repeated presentations solely because `jti` repeats. The API does not persist the raw token or `sti`. Actual dispatch de-duplication remains separate and tied to TrustGuard's canonical transaction/idempotency keys; the Skyfire screening endpoint itself never dispatches.
 
-The response may include `sub`, `aud`, `tsi`, `tdm` (only when configured), `amt`, and `cur`. It never returns the token, `sti`, or `val`; it does not log or persist token contents or settlement information. A Skyfire PAY or KYA-PAY token is only a signed Skyfire token signal and does not authorize a PayPal debit.
+The response reports a generic subject identifier and semantics, audience, and normalized Seller Service ID without relabeling draft `sub` as a buyer account ID. It never returns the token, `sti`, or `val`; it does not log or persist raw token contents or settlement information. A Skyfire PAY or KYA-PAY token is only a signed token signal and does not authorize a PayPal debit.
 
 ## Local ML anomaly screening (not a production fraud detector)
 
@@ -295,7 +299,7 @@ export TRUSTGUARD_ALLOWED_HOSTS=127.0.0.1,localhost
 uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-The OpenAPI environment switch above is for local inspection only. Open `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/openapi.json` only after the schema is deliberately enabled. Otherwise `/openapi.json`, `/docs`, and `/redoc` are disabled/not exposed. The service fetches the configured JWKS only when a token request requires a key-cache refresh; offline tests replace this fetcher and prohibit real network connections. Do not use real settlement tokens in an untrusted local environment. The Skyfire profile is still unresolved for this account.
+The OpenAPI environment switch above is for local inspection only. Open the localhost health/OpenAPI URLs only after the schema is deliberately enabled and one explicit profile is configured. Without a selected profile, OpenAPI and profile routes are disabled/unready. The service fetches only the configured JWKS when a token request needs a key-cache refresh; offline tests inject fake JWKS and prohibit real network connections. Do not use real settlement tokens in an untrusted local environment. The account has not confirmed either candidate profile.
 
 ## Container preparation
 
@@ -307,9 +311,12 @@ docker run --rm --name trustguard-local \
   --mount source=trustguard-data,target=/data \
   -e TRUSTGUARD_OPENAPI_ENABLED=true \
   -e TRUSTGUARD_ALLOWED_HOSTS=127.0.0.1,localhost \
+  -e SKYFIRE_PROTOCOL_PROFILE="${SKYFIRE_PROTOCOL_PROFILE:?choose only after authoritative account confirmation}" \
+  -e SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED="${SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED:?must be true only after authoritative account verification}" \
   -e SKYFIRE_ISSUER="${SKYFIRE_ISSUER:?set the confirmed Sandbox issuer}" \
   -e SKYFIRE_JWKS_URL="${SKYFIRE_JWKS_URL:?set the documented Sandbox JWKS URL}" \
   -e SKYFIRE_EXPECTED_ENVIRONMENT="${SKYFIRE_EXPECTED_ENVIRONMENT:?set sandbox}" \
+  -e SKYFIRE_EXPECTED_AUDIENCE="${SKYFIRE_EXPECTED_AUDIENCE:?set the exact profile-specific audience}" \
   -e SKYFIRE_SELLER_AGENT_ACCOUNT_ID="${SKYFIRE_SELLER_AGENT_ACCOUNT_ID:?set the authorized Seller Agent Account ID}" \
   -e SKYFIRE_SELLER_SERVICE_ID="${SKYFIRE_SELLER_SERVICE_ID:?set the authorized Seller Service ID}" \
   trustguard-local
@@ -327,10 +334,18 @@ No image is published and no public endpoint or deployment is configured. Use HT
 ## Files
 
 - `app.py`: FastAPI token-validation and provider-free ML screening routes; no PayPal calls.
-- `skyfire_auth.py`: explicit Sandbox ES256/JWKS configuration and draft-03 claim validation.
+- `skyfire_auth.py`: explicit versioned profile adapters, configured Sandbox ES256/JWKS verification, profile-specific header and claim validation, and default-disabled account activation.
 - `trustguard.py`: SQLite ledger, transaction idempotency, shared risk-screening pipeline, and separate legacy dispatch primitives.
 - `risk_scoring.py`: deterministic synthetic-data IsolationForest scorer; not production validated.
 - `paypal_rest.py`: separate Sandbox-only Orders adapter, not called by the HTTP API.
 - `Dockerfile`, `.dockerignore`: non-root container setup and build-context exclusions.
 - `tests/test_skyfire_api.py`: generated tokens, fake JWKS, claim/config/repeated-token tests, and direct ASGI calls.
+- `tests/test_skyfire_profiles.py`: separate generated-key fixtures and route/OpenAPI/claim-mixing tests for the published and November draft profiles; not provider integration evidence.
 - `tests/test_trustguard.py`: auth/ledger/provider tests and ML allow/HOLD/failure/durability/reproducibility regression tests.
+
+## Protocol references
+
+- [Skyfire published token verification guidance](https://docs.skyfire.xyz/docs/verify-and-extract-data-from-tokens) and [published KYAPay validation](https://kyapay.org/specifications/validation-and-claim-extraction).
+- [KYAPay published token schemas](https://kyapay.org/specifications/kya-pay-token).
+- [Skyfire official KYAPay example API](https://github.com/skyfire-xyz/kyapay/blob/main/docs/example-api.md).
+- [November 2026 token-format Internet-Draft](https://datatracker.ietf.org/doc/html/draft-skyfire-oauth-kyapay-token-03) and [HTTP usage Internet-Draft](https://datatracker.ietf.org/doc/html/draft-skyfire-oauth-using-kyapay-tokens-02). These are work in progress, not finalized standards or account-specific onboarding evidence.

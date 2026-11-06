@@ -1,14 +1,19 @@
-"""Skyfire KYAPay bearer-token validation. Token contents and settlement data are never logged."""
+"""Strict, explicitly selected Skyfire KYAPay protocol profiles.
+
+No profile is inferred from an incoming token. Raw tokens and settlement claims are
+never logged or returned. All generated-key tests are LOCAL TEST ONLY fixtures.
+"""
 from __future__ import annotations
 
 import os
+import math
 import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import jwt
@@ -17,15 +22,17 @@ from jwt import InvalidTokenError
 
 from trustguard import SecurityError
 
-# Skyfire's official seller-verification guide publishes the Sandbox JWKS URL.
-# KYAPay draft-03 specifies that the JWKS URI is built from the trusted iss origin
-# plus /.well-known/jwks.json. Therefore this verifier only enables that documented pair.
+PROFILE_LEGACY = "legacy-published"
+PROFILE_DRAFT = "ietf-draft-2026-11"
+SUPPORTED_PROFILES = frozenset({PROFILE_LEGACY, PROFILE_DRAFT})
+LEGACY_HEADER = "skyfire-pay-id"
+DRAFT_HEADER = "KYAPay-Token"
 DOCUMENTED_SANDBOX_ISSUER = "https://app-sandbox.skyfire.xyz"
 DOCUMENTED_SANDBOX_JWKS_URL = "https://app-sandbox.skyfire.xyz/.well-known/jwks.json"
 EXPECTED_SANDBOX_ENVIRONMENT = "sandbox"
-ALLOWED_TYPES = {"kya+jwt", "pay+jwt", "kya-pay+jwt"}
 JWKS_CACHE_TTL_SECONDS = 300
 JWKS_CACHE_MAX_SECONDS = 3600
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 
 
 class SkyfireTokenError(SecurityError):
@@ -41,9 +48,15 @@ class SkyfireSettings:
     seller_service_id: str
     database_path: str
     target_domain: str | None = None
+    protocol_profile: str | None = None
+    expected_audience: str | None = None
+    account_configuration_confirmed: bool = False
 
     def __post_init__(self) -> None:
-        if not all((self.issuer, self.jwks_url, self.expected_environment, self.seller_agent_account_id, self.seller_service_id, self.database_path)):
+        if self.protocol_profile not in SUPPORTED_PROFILES:
+            raise SkyfireTokenError("an explicit supported Skyfire protocol profile is required")
+        if not all((self.issuer, self.jwks_url, self.expected_environment,
+                    self.seller_agent_account_id, self.seller_service_id, self.database_path)):
             raise SkyfireTokenError("required Skyfire service configuration is missing")
         if self.seller_service_id.startswith("LOCAL-TEST-ONLY-PAYPAL-"):
             raise SkyfireTokenError("synthetic service identities are forbidden in official Skyfire verification")
@@ -51,18 +64,32 @@ class SkyfireSettings:
             raise SkyfireTokenError("a durable TrustGuard ledger path is required")
         if self.expected_environment != EXPECTED_SANDBOX_ENVIRONMENT:
             raise SkyfireTokenError("only explicitly configured Sandbox validation is supported")
-        if self.issuer != DOCUMENTED_SANDBOX_ISSUER or self.jwks_url != DOCUMENTED_SANDBOX_JWKS_URL:
-            raise SkyfireTokenError("issuer and JWKS must match the documented Skyfire Sandbox pair")
-        parsed = urlsplit(self.issuer)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment:
-            raise SkyfireTokenError("trusted issuer must be an HTTPS origin")
-        if self.jwks_url != self.issuer + "/.well-known/jwks.json":
-            raise SkyfireTokenError("JWKS URL does not match the configured issuer")
+        if not isinstance(self.account_configuration_confirmed, bool):
+            raise SkyfireTokenError("Skyfire account-configuration confirmation is invalid")
+        issuer = urlsplit(self.issuer)
+        jwks = urlsplit(self.jwks_url)
+        if (issuer.scheme != "https" or not issuer.hostname or issuer.path not in ("", "/")
+                or issuer.query or issuer.fragment or issuer.username or issuer.password):
+            raise SkyfireTokenError("trusted issuer must be a configured HTTPS origin")
+        if (jwks.scheme != "https" or not jwks.hostname or jwks.username or jwks.password
+                or jwks.query or jwks.fragment or jwks.netloc.lower() != issuer.netloc.lower()
+                or jwks.path != "/.well-known/jwks.json"):
+            raise SkyfireTokenError("JWKS URL must be the configured issuer's well-known endpoint")
+        if not isinstance(self.expected_audience, str) or not self.expected_audience.strip():
+            raise SkyfireTokenError("an exact trusted Skyfire audience is required")
+        if self.protocol_profile == PROFILE_LEGACY and self.expected_audience != self.seller_agent_account_id:
+            raise SkyfireTokenError("published-profile audience must equal the configured Seller Agent Account ID")
         if self.target_domain is not None and not self.target_domain.strip():
             raise SkyfireTokenError("configured target domain is invalid")
 
     @classmethod
     def from_env(cls) -> "SkyfireSettings":
+        profile = os.environ.get("SKYFIRE_PROTOCOL_PROFILE", "").strip()
+        if profile not in SUPPORTED_PROFILES:
+            raise SkyfireTokenError("SKYFIRE_PROTOCOL_PROFILE must explicitly select a supported profile")
+        confirmation = os.environ.get("SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED", "false").strip().lower()
+        if confirmation not in {"true", "false"}:
+            raise SkyfireTokenError("SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED must be true or false")
         values = {
             "issuer": os.environ.get("SKYFIRE_ISSUER", "").strip(),
             "jwks_url": os.environ.get("SKYFIRE_JWKS_URL", "").strip(),
@@ -70,7 +97,13 @@ class SkyfireSettings:
             "seller_agent_account_id": os.environ.get("SKYFIRE_SELLER_AGENT_ACCOUNT_ID", "").strip(),
             "seller_service_id": os.environ.get("SKYFIRE_SELLER_SERVICE_ID", "").strip(),
             "database_path": os.environ.get("TRUSTGUARD_DATABASE_PATH", "").strip(),
+            "protocol_profile": profile,
+            "expected_audience": os.environ.get("SKYFIRE_EXPECTED_AUDIENCE", "").strip() or None,
+            "account_configuration_confirmed": confirmation == "true",
         }
+        if values["expected_audience"] is None and profile == PROFILE_LEGACY:
+            # Legacy published documentation defines aud as the Seller Agent Account ID.
+            values["expected_audience"] = values["seller_agent_account_id"] or None
         target_domain = os.environ.get("SKYFIRE_TARGET_DOMAIN", "").strip() or None
         try:
             return cls(**values, target_domain=target_domain)
@@ -78,17 +111,224 @@ class SkyfireSettings:
             raise SkyfireTokenError("required Skyfire service configuration is invalid") from exc
 
 
+def protocol_header(profile: str) -> str:
+    if profile == PROFILE_LEGACY:
+        return LEGACY_HEADER
+    if profile == PROFILE_DRAFT:
+        return DRAFT_HEADER
+    raise SkyfireTokenError("an explicit supported Skyfire protocol profile is required")
+
+
+def parse_profile_header(profile: str, selected_values: Sequence[str], other_values: Sequence[str]) -> list[str]:
+    """Parse exactly the selected profile's wire representation, never fall back."""
+    if profile not in SUPPORTED_PROFILES:
+        raise SkyfireTokenError("Skyfire protocol profile is unavailable")
+    if other_values:
+        raise SkyfireTokenError("request contains a conflicting Skyfire protocol header")
+    if not selected_values:
+        raise SkyfireTokenError("Skyfire token header is missing")
+    if any(not isinstance(value, str) or not value for value in selected_values):
+        raise SkyfireTokenError("Skyfire token header is malformed")
+    if sum(len(value) for value in selected_values) > 65536:
+        raise SkyfireTokenError("Skyfire token header is malformed")
+    if profile == PROFILE_LEGACY:
+        if len(selected_values) != 1 or not _TOKEN_RE.fullmatch(selected_values[0]):
+            raise SkyfireTokenError("published Skyfire token header is malformed")
+        return [selected_values[0]]
+
+    # draft-02 defines a List Structured Field whose members are bare Tokens.
+    # Compact JWT characters are a strict subset of SF Token characters; parse
+    # that subset and reject parameters, quoted members, empty members and junk.
+    joined = ",".join(selected_values)
+    if not joined.strip():
+        raise SkyfireTokenError("draft KYAPay token list is malformed")
+    tokens: list[str] = []
+    for member in joined.split(","):
+        token = member.strip(" \t")
+        if not token or not _TOKEN_RE.fullmatch(token):
+            raise SkyfireTokenError("draft KYAPay token list is malformed")
+        tokens.append(token)
+    return tokens
+
+
+class _ProfileAdapter:
+    name: str
+    header: str
+    token_types: frozenset[str]
+    service_claim: str
+
+    def normalize_type(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.lower()
+        if normalized.startswith("application/"):
+            normalized = normalized[len("application/"):]
+        return normalized if normalized in self.token_types else None
+
+    def validate_claims(self, claims: dict[str, Any], token_type: str,
+                        settings: SkyfireSettings, now: float) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @staticmethod
+    def _amount(value: Any) -> Decimal | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            result = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+        return result if result.is_finite() and result > 0 else None
+
+    @staticmethod
+    def _base(claims: dict[str, Any], settings: SkyfireSettings, now: float,
+              *, uuid_identifiers: bool) -> tuple[str, str, str, int, int, str]:
+        required = ("iss", "sub", "aud", "iat", "exp", "jti")
+        if any(name not in claims for name in required):
+            raise SkyfireTokenError("Skyfire token validation failed")
+        if claims.get("iss") != settings.issuer or claims.get("aud") != settings.expected_audience:
+            raise SkyfireTokenError("Skyfire token validation failed")
+        sub, jti = claims.get("sub"), claims.get("jti")
+        if not isinstance(sub, str) or not sub or len(sub) > 2048 or not isinstance(jti, str) or not jti or len(jti) > 256:
+            raise SkyfireTokenError("Skyfire token validation failed")
+        if uuid_identifiers:
+            try:
+                sub = str(uuid.UUID(sub))
+                jti = str(uuid.UUID(jti))
+            except (ValueError, AttributeError) as exc:
+                raise SkyfireTokenError("Skyfire token validation failed") from exc
+        iat, exp = claims.get("iat"), claims.get("exp")
+        if (isinstance(iat, bool) or not isinstance(iat, int) or iat >= int(now)
+                or isinstance(exp, bool) or not isinstance(exp, int) or exp <= now or exp <= iat):
+            raise SkyfireTokenError("Skyfire token validation failed")
+        # Draft -03 permits an absent env claim; any supplied value is bound to Sandbox.
+        if "env" in claims and claims["env"] != settings.expected_environment:
+            raise SkyfireTokenError("Skyfire token validation failed")
+        return settings.issuer, sub, claims["aud"], iat, exp, jti
+
+    @staticmethod
+    def _payment(claims: dict[str, Any], token_type: str,
+                 profile: str) -> tuple[Decimal | None, str | None]:
+        if token_type == "kya+jwt":
+            return None, None
+        amount = _ProfileAdapter._amount(claims.get("amt"))
+        currency = claims.get("cur")
+        settlement_value = _ProfileAdapter._amount(claims.get("val"))
+        settlement_type = claims.get("stp")
+        settlement_info = claims.get("sti")
+        if (amount is None or settlement_value is None
+                or not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency)
+                or settlement_type not in {"coin", "card"}
+                or not isinstance(settlement_info, dict)):
+            raise SkyfireTokenError("Skyfire payment claims are invalid")
+        if "verified" in settlement_info and settlement_info["verified"] is not True:
+            raise SkyfireTokenError("Skyfire payment claims are invalid")
+        if profile == PROFILE_DRAFT:
+            settlement_names = {"coin": {"usdc"}, "card": {"visa_vic", "mastercard_scof"}}
+            if settlement_info.get("type") not in settlement_names[settlement_type]:
+                raise SkyfireTokenError("Skyfire payment claims are invalid")
+            if "tps" in claims and claims["tps"] not in {
+                "pay_per_use", "subscription", "pay_per_mb", "custom",
+            }:
+                raise SkyfireTokenError("Skyfire payment claims are invalid")
+            if "tpr" in claims and _ProfileAdapter._amount(claims["tpr"]) is None:
+                raise SkyfireTokenError("Skyfire payment claims are invalid")
+            if "mnr" in claims and (
+                isinstance(claims["mnr"], bool)
+                or not isinstance(claims["mnr"], (int, float))
+                or not math.isfinite(claims["mnr"])
+                or claims["mnr"] <= 0
+            ):
+                raise SkyfireTokenError("Skyfire payment claims are invalid")
+            if settlement_type == "card" and (
+                not isinstance(settlement_info.get("payment_token"), str)
+                or not re.fullmatch(r"[0-9]{12,19}", settlement_info["payment_token"])
+                or not isinstance(settlement_info.get("token_expiration_month"), str)
+                or not re.fullmatch(r"0[1-9]|1[0-2]", settlement_info["token_expiration_month"])
+                or not isinstance(settlement_info.get("token_expiration_year"), str)
+                or not re.fullmatch(r"[0-9]{4}", settlement_info["token_expiration_year"])
+                or not isinstance(settlement_info.get("token_security_code"), str)
+                or not re.fullmatch(r"[0-9]{3,4}", settlement_info["token_security_code"])
+            ):
+                raise SkyfireTokenError("Skyfire payment claims are invalid")
+        return amount, currency
+
+
+class LegacyPublishedProfile(_ProfileAdapter):
+    """Published validation profile: skyfire-pay-id + ssi (not an account approval)."""
+    name = PROFILE_LEGACY
+    header = LEGACY_HEADER
+    token_types = frozenset({"kya+jwt", "pay+jwt", "kya-pay+jwt"})
+    service_claim = "ssi"
+
+    def validate_claims(self, claims: dict[str, Any], token_type: str,
+                        settings: SkyfireSettings, now: float) -> dict[str, Any]:
+        # A valid `tsi` is never a substitute for published `ssi`.
+        if ("tsi" in claims or claims.get("ssi") != settings.seller_service_id
+                or claims.get("env") != settings.expected_environment):
+            raise SkyfireTokenError("Skyfire token validation failed")
+        _, sub, audience, iat, exp, jti = self._base(claims, settings, now, uuid_identifiers=True)
+        amount, currency = self._payment(claims, token_type, self.name)
+        return _normalized(self.name, token_type, settings.issuer, sub, audience,
+                           settings.seller_service_id, exp, jti, amount, currency, claims)
+
+
+class NovemberDraftProfile(_ProfileAdapter):
+    """November 2026 working-draft profile: KYAPay-Token List + tsi."""
+    name = PROFILE_DRAFT
+    header = DRAFT_HEADER
+    token_types = frozenset({"kya+jwt", "pay+jwt", "kya-pay+jwt"})
+    service_claim = "tsi"
+
+    def validate_claims(self, claims: dict[str, Any], token_type: str,
+                        settings: SkyfireSettings, now: float) -> dict[str, Any]:
+        # A valid `ssi` is never a substitute for draft `tsi`.
+        if "ssi" in claims or claims.get("tsi") != settings.seller_service_id:
+            raise SkyfireTokenError("Skyfire token validation failed")
+        _, sub, audience, iat, exp, jti = self._base(claims, settings, now, uuid_identifiers=False)
+        if settings.target_domain is not None and claims.get("tdm") != settings.target_domain:
+            raise SkyfireTokenError("Skyfire token target domain is invalid")
+        amount, currency = self._payment(claims, token_type, self.name)
+        return _normalized(self.name, token_type, settings.issuer, sub, audience,
+                           settings.seller_service_id, exp, jti, amount, currency, claims)
+
+
+def _normalized(profile: str, token_type: str, issuer: str, subject: str, audience: str,
+                service_id: str, exp: int, jti: str, amount: Decimal | None,
+                currency: str | None, claims: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "protocol_profile": profile,
+        "token_type": token_type,
+        "issuer": issuer,
+        "sub": subject,
+        "sub_semantics": "buyer_agent_account_id" if profile == PROFILE_LEGACY else "pairwise_initiator_identity_subject",
+        "aud": audience,
+        "service_id": service_id,
+        "exp": exp,
+        "jti": jti,
+        "amount": amount,
+        "currency": currency,
+        "tdm": claims.get("tdm") if profile == PROFILE_DRAFT else None,
+    }
+
+
+_PROFILES: dict[str, _ProfileAdapter] = {
+    PROFILE_LEGACY: LegacyPublishedProfile(),
+    PROFILE_DRAFT: NovemberDraftProfile(),
+}
+
+
 class SkyfireTokenVerifier:
-    """Verify Skyfire JWTs against an explicit, bounded HTTPS JWKS configuration."""
+    """Verify one explicitly selected profile against configured issuer keys."""
 
     def __init__(self, settings: SkyfireSettings, *, jwks_fetcher: Callable[[], Mapping[str, Any]] | None = None,
                  cache_ttl_seconds: int = JWKS_CACHE_TTL_SECONDS, clock: Callable[[], float] = time.time,
                  monotonic_clock: Callable[[], float] = time.monotonic):
-        if not isinstance(settings, SkyfireSettings):
-            raise SkyfireTokenError("required Skyfire service configuration is missing")
+        if not isinstance(settings, SkyfireSettings) or settings.protocol_profile not in _PROFILES:
+            raise SkyfireTokenError("an explicit supported Skyfire protocol profile is required")
         if not isinstance(cache_ttl_seconds, int) or isinstance(cache_ttl_seconds, bool) or not 1 <= cache_ttl_seconds <= JWKS_CACHE_MAX_SECONDS:
             raise SkyfireTokenError("JWKS cache duration is invalid")
         self.settings = settings
+        self.profile = _PROFILES[settings.protocol_profile]
         self._fetcher = jwks_fetcher or self._fetch_jwks
         self._ttl = cache_ttl_seconds
         self._clock = clock
@@ -98,12 +338,8 @@ class SkyfireTokenVerifier:
         self._expires_at = 0.0
 
     def _fetch_jwks(self) -> Mapping[str, Any]:
-        response = requests.get(
-            self.settings.jwks_url,
-            headers={"Accept": "application/json"},
-            timeout=(3.05, 10.0),
-            allow_redirects=False,
-        )
+        response = requests.get(self.settings.jwks_url, headers={"Accept": "application/json"},
+                                timeout=(3.05, 10.0), allow_redirects=False)
         if response.status_code != 200:
             raise SkyfireTokenError("Skyfire signing keys are unavailable")
         try:
@@ -150,34 +386,17 @@ class SkyfireTokenVerifier:
             self._expires_at = now + min(self._ttl, JWKS_CACHE_MAX_SECONDS)
             return self._keys
 
-    @staticmethod
-    def _header_type(value: Any) -> str | None:
-        if not isinstance(value, str):
-            return None
-        normalized = value.lower()
-        if normalized.startswith("application/"):
-            normalized = normalized[len("application/"):]
-        return normalized if normalized in ALLOWED_TYPES else None
-
-    @staticmethod
-    def _positive_decimal(value: Any) -> Decimal | None:
-        if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
-            return None
-        try:
-            amount = Decimal(str(value))
-        except (InvalidOperation, ValueError):
-            return None
-        return amount if amount.is_finite() and amount > 0 else None
-
     def verify(self, token: str) -> dict[str, Any]:
-        if not isinstance(token, str) or not token or len(token) > 65536:
+        if not self.settings.account_configuration_confirmed:
+            raise SkyfireTokenError("Skyfire account configuration is not confirmed")
+        if not isinstance(token, str) or not token or len(token) > 65536 or not _TOKEN_RE.fullmatch(token):
             raise SkyfireTokenError("Skyfire token is missing or malformed")
         try:
             header = jwt.get_unverified_header(token)
         except (InvalidTokenError, TypeError, ValueError) as exc:
             raise SkyfireTokenError("Skyfire token is malformed") from exc
         kid = header.get("kid")
-        token_type = self._header_type(header.get("typ"))
+        token_type = self.profile.normalize_type(header.get("typ"))
         if not isinstance(kid, str) or not kid or header.get("alg") != "ES256" or token_type is None:
             raise SkyfireTokenError("Skyfire token header is not accepted")
         jwk = self._get_keys().get(kid)
@@ -186,72 +405,23 @@ class SkyfireTokenVerifier:
         try:
             key = jwt.PyJWK.from_dict(jwk, algorithm="ES256").key
             claims = jwt.decode(
-                token,
-                key,
-                algorithms=["ES256"],
-                issuer=self.settings.issuer,
-                audience=self.settings.seller_agent_account_id,
-                leeway=60,
-                options={"require": ["iss", "sub", "aud", "iat", "exp", "jti", "env", "tsi"], "verify_signature": True, "verify_iss": True, "verify_aud": True, "verify_iat": True, "verify_exp": True, "verify_nbf": True},
+                token, key, algorithms=["ES256"], issuer=self.settings.issuer,
+                audience=self.settings.expected_audience, leeway=0,
+                options={"require": ["iss", "sub", "aud", "iat", "exp", "jti"],
+                         "verify_signature": True, "verify_iss": True,
+                         "verify_aud": True, "verify_iat": True,
+                         "verify_exp": True, "verify_nbf": True},
             )
         except (jwt.PyJWTError, TypeError, ValueError, KeyError) as exc:
             raise SkyfireTokenError("Skyfire token validation failed") from exc
-        now = self._clock()
-        if claims.get("iss") != self.settings.issuer or claims.get("aud") != self.settings.seller_agent_account_id:
-            raise SkyfireTokenError("Skyfire token validation failed")
-        if claims.get("env") != self.settings.expected_environment:
-            raise SkyfireTokenError("Skyfire token validation failed")
-        if claims.get("tsi") != self.settings.seller_service_id:
-            raise SkyfireTokenError("Skyfire token validation failed")
-        if self.settings.target_domain is not None and claims.get("tdm") != self.settings.target_domain:
-            raise SkyfireTokenError("Skyfire token target domain is invalid")
-        iat, exp = claims.get("iat"), claims.get("exp")
-        if isinstance(iat, bool) or not isinstance(iat, int) or iat > now + 60 or isinstance(exp, bool) or not isinstance(exp, int) or exp <= now or exp <= iat:
-            raise SkyfireTokenError("Skyfire token time claims are invalid")
-        jti = claims.get("jti")
-        if not isinstance(jti, str):
-            raise SkyfireTokenError("Skyfire token identifier is invalid")
-        try:
-            canonical_jti = str(uuid.UUID(jti))
-        except (ValueError, AttributeError) as exc:
-            raise SkyfireTokenError("Skyfire token identifier is invalid") from exc
-        if not isinstance(claims.get("sub"), str) or not claims["sub"]:
-            raise SkyfireTokenError("Skyfire token subject is invalid")
-
-        amount: Decimal | None = None
-        currency: str | None = None
-        if token_type in {"pay+jwt", "kya-pay+jwt"}:
-            amount = self._positive_decimal(claims.get("amt"))
-            raw_currency = claims.get("cur")
-            if amount is None or not isinstance(raw_currency, str) or not re.fullmatch(r"[A-Z]{3}", raw_currency):
-                raise SkyfireTokenError("Skyfire payment claims are invalid")
-            currency = raw_currency
-            if currency != "USD" or self._positive_decimal(claims.get("val")) is None:
-                raise SkyfireTokenError("Skyfire settlement claims are invalid")
-            settlement_type = claims.get("stp")
-            if not isinstance(settlement_type, str) or settlement_type not in {"coin", "card", "bank"}:
-                raise SkyfireTokenError("Skyfire settlement claims are invalid")
-            settlement_info = claims.get("sti")
-            if not isinstance(settlement_info, dict) or settlement_info.get("verified") is not True:
-                raise SkyfireTokenError("Skyfire settlement claims are invalid")
-
-        # jti identifies this token; it is not used to reject repeated presentations.
-        # Return only a minimized projection. `sti` and the JWT are never returned.
-        return {
-            "token_type": token_type,
-            "jti": canonical_jti,
-            "exp": exp,
-            "sub": claims["sub"],
-            "aud": claims["aud"],
-            "tsi": claims["tsi"],
-            "tdm": claims.get("tdm") if self.settings.target_domain is not None else None,
-            "amount": amount,
-            "currency": currency,
-        }
+        return self.profile.validate_claims(claims, token_type, self.settings, self._clock())
 
 
 __all__ = [
-    "ALLOWED_TYPES", "DOCUMENTED_SANDBOX_ISSUER",
-    "DOCUMENTED_SANDBOX_JWKS_URL", "EXPECTED_SANDBOX_ENVIRONMENT", "SkyfireSettings",
-    "SkyfireTokenError", "SkyfireTokenVerifier",
+    "DOCUMENTED_SANDBOX_ISSUER", "DOCUMENTED_SANDBOX_JWKS_URL",
+    "EXPECTED_SANDBOX_ENVIRONMENT", "LEGACY_HEADER", "DRAFT_HEADER",
+    "PROFILE_LEGACY", "PROFILE_DRAFT", "SUPPORTED_PROFILES",
+    "LegacyPublishedProfile", "NovemberDraftProfile", "SkyfireSettings",
+    "SkyfireTokenError", "SkyfireTokenVerifier", "parse_profile_header",
+    "protocol_header",
 ]

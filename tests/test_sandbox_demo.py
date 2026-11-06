@@ -12,6 +12,7 @@ from scripts import run_paypal_sandbox_demo as demo
 from skyfire_auth import (
     DOCUMENTED_SANDBOX_ISSUER,
     DOCUMENTED_SANDBOX_JWKS_URL,
+    PROFILE_DRAFT,
     SkyfireSettings,
     SkyfireTokenError,
     SkyfireTokenVerifier,
@@ -459,6 +460,8 @@ def test_skyfire_settings_reject_reserved_paypal_synthetic_id_regardless_of_loca
             "operator-seller-account",
             PAYPAL_SYNTHETIC_SERVICE_ID,
             str(tmp_path / "official.sqlite3"),
+            protocol_profile=PROFILE_DRAFT,
+            expected_audience="operator-seller-account",
         )
 
 
@@ -481,6 +484,9 @@ def test_official_verifier_rejects_localhost_generated_token_with_fake_jwks_no_n
             "operator-seller-account",
             "operator-supplied-skyfire-service",
             str(tmp_path / "official.sqlite3"),
+            protocol_profile=PROFILE_DRAFT,
+            expected_audience="operator-seller-account",
+            account_configuration_confirmed=True,
         ),
         jwks_fetcher=lambda: (fetches.append(1) or {"keys": [local_jwk]}),
     )

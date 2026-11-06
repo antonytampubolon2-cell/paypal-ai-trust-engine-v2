@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 ASGIApp = Callable[[dict[str, Any], Callable[..., Awaitable[dict[str, Any]]], Callable[..., Awaitable[None]]], Awaitable[None]]
@@ -140,3 +140,46 @@ class RequestGuardMiddleware:
                     await _response(504, "request timed out")(send)
         finally:
             self._slots.release()
+
+
+class TokenCacheControlMiddleware:
+    """Protect responses that depend on sensitive KYAPay token headers from shared caches."""
+
+    def __init__(self, app: ASGIApp, *, token_headers: Sequence[str]):
+        self.app = app
+        self.token_headers = {header.lower().encode("ascii") for header in token_headers}
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        present = any(
+            name.lower() in self.token_headers
+            for name, _value in scope.get("headers", [])
+        )
+        if not present:
+            await self.app(scope, receive, send)
+            return
+
+        async def protected_send(message):
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                vary_values = [value for name, value in headers if name.lower() == b"vary"]
+                vary_tokens = {
+                    token.strip().lower()
+                    for value in vary_values
+                    for token in value.split(b",")
+                }
+                if b"*" not in vary_tokens:
+                    for header in self.token_headers:
+                        if header not in vary_tokens:
+                            vary_values.append(header)
+                    headers = [(name, value) for name, value in headers if name.lower() != b"vary"]
+                    if vary_values:
+                        headers.append((b"vary", b", ".join(vary_values)))
+                headers = [(name, value) for name, value in headers if name.lower() != b"cache-control"]
+                headers.append((b"cache-control", b"private, no-store"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, protected_send)

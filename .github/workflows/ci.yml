@@ -83,6 +83,9 @@ jobs:
           SKYFIRE_EXPECTED_ENVIRONMENT: sandbox
           SKYFIRE_SELLER_AGENT_ACCOUNT_ID: ci-test-seller-account-not-a-credential
           SKYFIRE_SELLER_SERVICE_ID: ci-test-seller-service-not-a-credential
+          SKYFIRE_PROTOCOL_PROFILE: legacy-published
+          SKYFIRE_EXPECTED_AUDIENCE: ci-test-seller-account-not-a-credential
+          SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED: "true"
           TRUSTGUARD_ENABLE_PAYPAL_SANDBOX: "false"
           TRUSTGUARD_OPENAPI_ENABLED: "true"
           TRUSTGUARD_ALLOWED_HOSTS: "localhost,127.0.0.1,testserver"
@@ -103,6 +106,9 @@ jobs:
             --env SKYFIRE_EXPECTED_ENVIRONMENT \
             --env SKYFIRE_SELLER_AGENT_ACCOUNT_ID \
             --env SKYFIRE_SELLER_SERVICE_ID \
+            --env SKYFIRE_PROTOCOL_PROFILE \
+            --env SKYFIRE_EXPECTED_AUDIENCE \
+            --env SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED \
             --env TRUSTGUARD_ENABLE_PAYPAL_SANDBOX \
             --env TRUSTGUARD_OPENAPI_ENABLED \
             --env TRUSTGUARD_ALLOWED_HOSTS \
