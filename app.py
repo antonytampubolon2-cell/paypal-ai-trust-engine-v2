@@ -13,7 +13,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from api_security import RequestGuardMiddleware
 from skyfire_auth import SkyfireSettings, SkyfireTokenError, SkyfireTokenVerifier
 from trustguard import CanonicalTransaction, Ledger, LedgerError, RiskScreeningPipeline, SecurityError
 
@@ -108,9 +110,47 @@ def _configured_paypal_mapping(settings: SkyfireSettings) -> tuple[str, str | No
     return "CONFIGURED", merchant_id
 
 
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} is outside the supported range")
+    return value
+
+
+def _allowed_hosts_from_env() -> list[str]:
+    raw = os.environ.get("TRUSTGUARD_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],testserver")
+    hosts = [host.strip().lower() for host in raw.split(",") if host.strip()]
+    return _validate_allowed_hosts(hosts)
+
+
+def _validate_allowed_hosts(hosts: list[str]) -> list[str]:
+    if not hosts or any(not isinstance(host, str) or not host.strip() or "*" in host or "/" in host or any(ch.isspace() for ch in host) for host in hosts):
+        raise ValueError("TRUSTGUARD_ALLOWED_HOSTS must be a non-empty explicit host allowlist")
+    return [host.strip().lower() for host in hosts]
+
+
+def _openapi_path_from_env() -> str:
+    path = os.environ.get("TRUSTGUARD_OPENAPI_PATH", "/openapi.json").strip()
+    return _validate_openapi_path(path)
+
+
+def _validate_openapi_path(path: str) -> str:
+    if not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path or ".." in path:
+        raise ValueError("TRUSTGUARD_OPENAPI_PATH must be an absolute local path")
+    return path
+
+
 def create_app(*, settings: SkyfireSettings | None = None, ledger: Ledger | None = None,
                verifier: Any | None = None, ledger_factory: Callable[[str], Ledger] = Ledger,
-               risk_scorer: Any = _DEFAULT_API_SCORER) -> FastAPI:
+               risk_scorer: Any = _DEFAULT_API_SCORER,
+               openapi_enabled: bool | None = None, openapi_path: str | None = None,
+               allowed_hosts: list[str] | None = None) -> FastAPI:
     """Create a configured app, or a fail-closed unready app when required config is absent."""
     error = False
     if settings is None:
@@ -138,14 +178,36 @@ def create_app(*, settings: SkyfireSettings | None = None, ledger: Ledger | None
     reviewer_credential = os.environ.get("TRUSTGUARD_REVIEWER_CREDENTIAL", "")
     reviewer_enabled = bool(reviewer_id and reviewer_credential)
 
+    if openapi_enabled is None:
+        publication_setting = os.environ.get("TRUSTGUARD_OPENAPI_ENABLED", "false").strip().lower()
+        if publication_setting not in {"true", "false"}:
+            raise ValueError("TRUSTGUARD_OPENAPI_ENABLED must be true or false")
+        openapi_enabled = publication_setting == "true"
+    configured_openapi_path = _validate_openapi_path(openapi_path) if openapi_path is not None else _openapi_path_from_env()
+    trusted_hosts = _validate_allowed_hosts(allowed_hosts) if allowed_hosts is not None else _allowed_hosts_from_env()
+    max_body_bytes = _env_int("TRUSTGUARD_MAX_REQUEST_BODY_BYTES", 1_048_576, minimum=1024, maximum=10_485_760)
+    max_concurrent = _env_int("TRUSTGUARD_MAX_CONCURRENT_REQUESTS", 16, minimum=1, maximum=256)
+    rate_limit = _env_int("TRUSTGUARD_RATE_LIMIT_REQUESTS", 120, minimum=1, maximum=10_000)
+    rate_window = _env_int("TRUSTGUARD_RATE_LIMIT_WINDOW_SECONDS", 60, minimum=1, maximum=3600)
+    request_timeout = _env_int("TRUSTGUARD_REQUEST_TIMEOUT_SECONDS", 30, minimum=1, maximum=300)
+
     application = FastAPI(
         title="TrustGuard Skyfire Seller Service",
         description="Validates Skyfire tokens and provides a separate provider-free, ledger-reserved ML transaction screening endpoint. No route creates or captures PayPal orders.",
         version="1.0.0",
-        openapi_url="/openapi.json",
-        docs_url="/docs",
+        openapi_url=configured_openapi_path if openapi_enabled else None,
+        docs_url=None,
         redoc_url=None,
     )
+    application.add_middleware(
+        RequestGuardMiddleware,
+        max_body_bytes=max_body_bytes,
+        max_concurrent_requests=max_concurrent,
+        rate_limit_requests=rate_limit,
+        rate_limit_window_seconds=rate_window,
+        request_timeout_seconds=float(request_timeout),
+    )
+    application.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
     application.state.ready = ready
     application.state.screening = screening
     application.state.paypal_mapping_status = mapping_status

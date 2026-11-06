@@ -9,7 +9,7 @@ The API accepts `skyfire-pay-id` as requested. Skyfire currently documents `kyap
 ## HTTP endpoints
 
 - `GET /healthz`: `200` when the required configuration and durable SQLite ledger are ready; otherwise `503`.
-- `GET /openapi.json`: generated OpenAPI document. It marks `skyfire-pay-id` as a required request header.
+- `GET /openapi.json`: generated OpenAPI document only when `TRUSTGUARD_OPENAPI_ENABLED=true`; publication is disabled by default. Its configured path defaults to `/openapi.json` and may be changed with `TRUSTGUARD_OPENAPI_PATH`. Interactive `/docs` and `/redoc` are disabled. No public server URL is embedded. The current header/claim contract is unresolved for the actual Skyfire account; do not treat this schema as approved interoperability.
 - `POST /v1/agent/authorize`: validates the signed token and returns a minimized claim projection. The response explicitly says `paypal_payment_status: NOT_STARTED` and `paypal_payment_authorized: false`.
 - `POST /v1/agent/screen-transaction`: requires a valid Skyfire PAY/KYA-PAY token, validates a canonical request, durably reserves it against an identity derived from verified token claims, and invokes the existing local IsolationForest scorer. It returns `ALLOW` or `HOLD`, a reason code, and persisted model metadata. This route has no provider dependency and never creates or captures a PayPal order.
 - `POST /v1/admin/transactions/{transaction_id}/review`: when separately configured, records `KEEP_HOLD` or `RELEASE_RESERVATION` with a review reason. Release marks only a still-undispatched HOLD as `REVIEW_RELEASED`; it does not authorize payment.
@@ -34,9 +34,21 @@ Skyfire `tsi` and PayPal merchant ID are separate identifier namespaces and are 
 
 Administrative review is disabled unless both `TRUSTGUARD_REVIEWER_ID` and `TRUSTGUARD_REVIEWER_CREDENTIAL` are present. Reviewer identity is server-configured; the credential is compared in constant time and never returned or logged. The durable audit records reviewer ID, decision, reason, and timestamp. Only an exact repeat of the same authenticated decision/reason is idempotent; conflicting later reviews are rejected. `UNKNOWN`, `DISPATCH_STARTED`, any non-HOLD state, and any row with a provider order ID cannot be released. Keep the reviewer credential in a secret manager/environment injection, never in source, README examples, or shell history.
 
+## Public API security and deployment controls
+
+The FastAPI process applies a 1 MiB request-body limit by default, counting received ASGI body chunks even when `Content-Length` is absent. The limit is configurable with `TRUSTGUARD_MAX_REQUEST_BODY_BYTES` (1 KiB–10 MiB). Admission is bounded to 16 concurrent requests by default (`TRUSTGUARD_MAX_CONCURRENT_REQUESTS`, 1–256), and a 30-second ASGI request deadline is applied (`TRUSTGUARD_REQUEST_TIMEOUT_SECONDS`, 1–300). A timed-out synchronous worker-thread operation cannot be forcibly killed by Python; the concurrency bound still caps outstanding work, and the host ingress should enforce its own connection and response deadlines. These values are operational safeguards, not Skyfire protocol settings; adjust only after workload review. Keep one Uvicorn worker with SQLite.
+
+A process-local fixed-window limiter defaults to 120 requests per direct socket peer per 60 seconds. It never trusts `X-Forwarded-For` or similar caller-provided headers. Behind a reverse proxy, the app therefore sees the proxy as the peer; configure rate limits and connection/body/time limits at the trusted ingress as well. Do not make the app trust forwarded client-IP headers without a separately reviewed trusted-proxy configuration. A service host must configure ingress limits; app-level limits alone are not a substitute for volumetric DDoS protection.
+
+`TRUSTGUARD_ALLOWED_HOSTS` is an explicit comma-separated allowlist; absent configuration permits only local/test hostnames, not an arbitrary public hostname. Set the actual assigned deployment host before public exposure; no hostname is assumed here. CORS remains disabled because this is server-to-server. Do not enable wildcard credentialed CORS. `GET /healthz` remains minimal and reports only readiness status.
+
+The image preserves UID/GID 10001 and defaults `PORT` to 8000; Uvicorn and the Docker health check use the same `PORT` value. `TRUSTGUARD_DATABASE_PATH` defaults to `/data/trustguard.sqlite3`, and `/data` is declared as a Docker volume. **A Docker `VOLUME` declaration alone does not provide durable host storage, backups, or restore capability.** Mount a persistent host volume at `/data`, confirm UID 10001 can write it, and keep one instance/worker. Persistence tests only verify reopening the same local file; they do not verify any provider backup/restore service.
+
+Use the exact Python 3.12 pins in `requirements.lock` for Docker and CI (`python -m pip install -r requirements.lock`). `requirements.txt` remains the direct dependency declaration; dependency refreshes must be reviewed and update the lock coherently. OpenAPI 3.1.0 documents are formally validated in tests/CI with `openapi-spec-validator`. Authentication profile semantics deliberately remain unmodeled as an OpenAPI security scheme until Skyfire confirms the account's actual protocol; no security scheme or public server URL is guessed.
+
 ## Reproducible offline synthetic model evaluation
 
-After installing `requirements.txt`, run from the repository root:
+After installing the exact pins from `requirements.lock`, run from the repository root:
 
 ```bash
 python scripts/evaluate_risk_model.py
@@ -211,14 +223,14 @@ Tests need no Skyfire or PayPal credentials. They generate ES256 keys and tokens
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.lock
 export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
 pytest -q
 ```
 
 ### LOCAL TEST ONLY screening demonstration
 
-After installing `requirements.txt`, run the full offline demonstration from the repository root with one command:
+After installing `requirements.lock`, run the full offline demonstration from the repository root with one command:
 
 ```bash
 python scripts/run_local_demo.py
@@ -270,19 +282,23 @@ To run the API locally, provide the required variables from the authorized Sandb
 
 ```bash
 export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
-uvicorn app:app --host 127.0.0.1 --port 8000 --no-access-log
+export TRUSTGUARD_OPENAPI_ENABLED=true
+export TRUSTGUARD_ALLOWED_HOSTS=127.0.0.1,localhost
+uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-Open `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/openapi.json`. The service fetches the configured JWKS only when a request requires a key cache refresh. Do not use real settlement tokens in an untrusted local environment.
+The OpenAPI environment switch above is for local inspection only. Open `http://127.0.0.1:8000/healthz` and `http://127.0.0.1:8000/openapi.json` only after the schema is deliberately enabled. Otherwise `/openapi.json`, `/docs`, and `/redoc` are disabled/not exposed. The service fetches the configured JWKS only when a token request requires a key-cache refresh; offline tests replace this fetcher and prohibit real network connections. Do not use real settlement tokens in an untrusted local environment. The Skyfire profile is still unresolved for this account.
 
 ## Container preparation
 
-The non-root `Dockerfile` sets `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false`, defaults the database to `/data/trustguard.sqlite3`, and expects persistent storage. Build locally with `docker build -t trustguard-local .`. To bind only to localhost, set the actual authorized values in the shell, then run:
+The non-root `Dockerfile` sets `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false`, defaults `PORT` to 8000 and the database to `/data/trustguard.sqlite3`, and disables OpenAPI publication by default. Build locally with `docker build -t trustguard-local .`. A Docker `VOLUME` declaration alone does not guarantee durable storage; the host must provide a persistent mount. To bind only to localhost, set actual authorized non-secret Sandbox values only when available, then run:
 
 ```bash
 docker run --rm --name trustguard-local \
   -p 127.0.0.1:8000:8000 \
   --mount source=trustguard-data,target=/data \
+  -e TRUSTGUARD_OPENAPI_ENABLED=true \
+  -e TRUSTGUARD_ALLOWED_HOSTS=127.0.0.1,localhost \
   -e SKYFIRE_ISSUER="${SKYFIRE_ISSUER:?set the confirmed Sandbox issuer}" \
   -e SKYFIRE_JWKS_URL="${SKYFIRE_JWKS_URL:?set the documented Sandbox JWKS URL}" \
   -e SKYFIRE_EXPECTED_ENVIRONMENT="${SKYFIRE_EXPECTED_ENVIRONMENT:?set sandbox}" \
@@ -291,7 +307,7 @@ docker run --rm --name trustguard-local \
   trustguard-local
 ```
 
-The image provides `TRUSTGUARD_DATABASE_PATH=/data/trustguard.sqlite3` and disables PayPal Sandbox dispatch. Verify the local smoke endpoints with:
+The image provides `TRUSTGUARD_DATABASE_PATH=/data/trustguard.sqlite3` and disables PayPal Sandbox dispatch. The OpenAPI and host settings above are local-only examples, not deployment settings. Verify the local smoke endpoints with:
 
 ```bash
 curl --fail http://127.0.0.1:8000/healthz

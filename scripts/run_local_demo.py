@@ -189,7 +189,10 @@ def run_demo():
         reviewer_credential = secrets.token_urlsafe(48)  # Memory only; never environment/file/output.
 
         def application(ledger):
-            instance = create_app(settings=settings, ledger=ledger, verifier=verifier, risk_scorer=scorer)
+            instance = create_app(
+                settings=settings, ledger=ledger, verifier=verifier, risk_scorer=scorer,
+                allowed_hosts=["local-test-only"],
+            )
             instance.state.reviewer_id = "LOCAL-TEST-ONLY-REVIEWER"
             instance.state.reviewer_credential = reviewer_credential
             instance.state.reviewer_enabled = True

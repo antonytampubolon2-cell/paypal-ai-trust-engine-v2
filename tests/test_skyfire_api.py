@@ -20,7 +20,7 @@ from skyfire_auth import (
     SkyfireTokenVerifier,
 )
 from trustguard import Ledger
-from risk_scoring import MODEL_VERSION, TRAINING_DATASET_ID
+from risk_scoring import ANOMALY_THRESHOLD, MODEL_VERSION, TRAINING_DATASET_ID
 
 
 SELLER_ID = "seller-agent-test"
@@ -81,23 +81,25 @@ def verifier(settings_, jwk, *, ttl=300, fetcher=None):
     )
 
 
-def asgi_request(app, method, path, *, headers=None, body=b""):
+def asgi_request(app, method, path, *, headers=None, body=b"", body_chunks=None, host="testserver", client_ip="127.0.0.1"):
     """Invoke the ASGI app directly; this harness performs no network I/O."""
     messages = []
     scope = {
         "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
         "http_version": "1.1", "method": method, "scheme": "http",
         "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
-        "headers": [(b"host", b"testserver"), *[(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]],
-        "server": ("testserver", 80), "client": ("127.0.0.1", 12345),
+        "headers": [(b"host", host.encode()), *[(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]],
+        "server": (host.split(":", 1)[0], 80), "client": (client_ip, 12345),
     }
-    sent_request = False
+    chunks = list(body_chunks) if body_chunks is not None else [body]
+    sent_chunks = 0
 
     async def receive():
-        nonlocal sent_request
-        if not sent_request:
-            sent_request = True
-            return {"type": "http.request", "body": body, "more_body": False}
+        nonlocal sent_chunks
+        if sent_chunks < len(chunks):
+            index = sent_chunks
+            sent_chunks += 1
+            return {"type": "http.request", "body": chunks[index], "more_body": sent_chunks < len(chunks)}
         return {"type": "http.disconnect"}
 
     async def send(message):
@@ -154,6 +156,7 @@ def test_explicit_documented_sandbox_pair_loads_from_environment(monkeypatch, tm
     assert loaded.issuer == DOCUMENTED_SANDBOX_ISSUER
     assert loaded.jwks_url == DOCUMENTED_SANDBOX_JWKS_URL
     assert loaded.expected_environment == "sandbox"
+    assert loaded.database_path == env["TRUSTGUARD_DATABASE_PATH"]
 
 
 def test_unconfirmed_or_mismatched_sandbox_pairs_fail_closed(tmp_path):
@@ -287,7 +290,7 @@ def test_required_configuration_fails_closed(monkeypatch):
 
 def test_api_openapi_health_and_header_documentation(tmp_path):
     fake = FakeVerifier({"jti": "unused", "exp": int(time.time()) + 300, "token_type": "kya+jwt", "sub": "buyer", "aud": SELLER_ID, "tsi": SERVICE_ID, "tdm": None, "amount": None, "currency": None})
-    app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "api.sqlite3"), verifier=fake)
+    app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "api.sqlite3"), verifier=fake, openapi_enabled=True)
     status, _, body = asgi_request(app, "GET", "/healthz")
     assert status == 200 and json.loads(body)["status"] == "ok"
     status, _, body = asgi_request(app, "GET", "/openapi.json")
@@ -296,6 +299,144 @@ def test_api_openapi_health_and_header_documentation(tmp_path):
     assert "/v1/agent/authorize" in spec["paths"]
     parameters = spec["paths"]["/v1/agent/authorize"]["post"]["parameters"]
     assert any(p["in"] == "header" and p["name"] == "skyfire-pay-id" and p["required"] is True for p in parameters)
+
+
+def test_publication_policy_and_formal_openapi_validation(tmp_path):
+    from openapi_spec_validator import validate
+
+    configured = settings(tmp_path)
+    disabled = create_app(settings=configured, ledger=Ledger(tmp_path / "metadata-off.sqlite3"), verifier=FakeVerifier({}))
+    assert asgi_request(disabled, "GET", "/openapi.json")[0] == 404
+    assert asgi_request(disabled, "GET", "/docs")[0] == 404
+    assert asgi_request(disabled, "GET", "/redoc")[0] == 404
+
+    published = create_app(
+        settings=configured, ledger=Ledger(tmp_path / "metadata-on.sqlite3"), verifier=FakeVerifier({}),
+        openapi_enabled=True, openapi_path="/registration/schema.json",
+    )
+    status, _, body = asgi_request(published, "GET", "/registration/schema.json")
+    assert status == 200
+    spec = json.loads(body)
+    assert spec["openapi"].startswith("3.1.")
+    validate(spec)
+    assert set(spec["paths"]) == {
+        "/healthz", "/v1/agent/authorize", "/v1/agent/screen-transaction",
+        "/v1/admin/transactions/{transaction_id}/review",
+    }
+    assert "servers" not in spec
+    assert "securitySchemes" not in spec.get("components", {})
+    assert asgi_request(published, "GET", "/docs")[0] == 404
+    cors_status, cors_headers, _ = asgi_request(published, "GET", "/healthz", headers={"origin": "https://untrusted.example"})
+    assert cors_status == 200
+    assert b"access-control-allow-origin" not in cors_headers
+
+
+def test_request_body_limit_counts_chunked_body_without_content_length(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRUSTGUARD_MAX_REQUEST_BODY_BYTES", "1024")
+    app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "body-limit.sqlite3"), verifier=FakeVerifier({}))
+    status, _, body = asgi_request(
+        app, "POST", "/v1/agent/authorize", headers={"skyfire-pay-id": "LOCAL-TEST-token"},
+        body_chunks=[b"a" * 600, b"b" * 600],
+    )
+    assert status == 413
+    assert b"request body too large" in body
+
+
+def test_request_body_limit_rejects_oversized_content_length(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRUSTGUARD_MAX_REQUEST_BODY_BYTES", "1024")
+    app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "body-length.sqlite3"), verifier=FakeVerifier({}))
+    status, _, _ = asgi_request(app, "POST", "/v1/agent/authorize", headers={"content-length": "1025"})
+    assert status == 413
+
+
+def test_request_guard_bounds_concurrency_and_times_out_without_external_io():
+    from api_security import RequestGuardMiddleware
+
+    async def downstream(scope, receive, send):
+        await asyncio.sleep(0.04)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    async def invoke(guard):
+        messages = []
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        async def send(message):
+            messages.append(message)
+        scope = {"type": "http", "method": "GET", "headers": [], "client": ("127.0.0.1", 1)}
+        await guard(scope, receive, send)
+        return next(message["status"] for message in messages if message["type"] == "http.response.start")
+
+    async def run_concurrency():
+        guard = RequestGuardMiddleware(downstream, max_concurrent_requests=1, rate_limit_requests=10)
+        return await asyncio.gather(invoke(guard), invoke(guard))
+
+    statuses = asyncio.run(run_concurrency())
+    assert sorted(statuses) == [200, 503]
+
+    async def run_timeout():
+        guard = RequestGuardMiddleware(downstream, request_timeout_seconds=0.001, rate_limit_requests=10)
+        return await invoke(guard)
+
+    assert asyncio.run(run_timeout()) == 504
+
+
+def test_trusted_host_and_direct_peer_rate_limit(tmp_path, monkeypatch):
+    app = create_app(
+        settings=settings(tmp_path), ledger=Ledger(tmp_path / "host-limit.sqlite3"), verifier=FakeVerifier({}),
+        allowed_hosts=["trustguard.test"],
+    )
+    assert asgi_request(app, "GET", "/healthz", host="attacker.test")[0] == 400
+
+    monkeypatch.setenv("TRUSTGUARD_RATE_LIMIT_REQUESTS", "1")
+    limited = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "rate-limit.sqlite3"), verifier=FakeVerifier({}))
+    first = asgi_request(limited, "GET", "/healthz", headers={"x-forwarded-for": "198.51.100.9"}, client_ip="127.0.0.1")
+    second = asgi_request(limited, "GET", "/healthz", headers={"x-forwarded-for": "203.0.113.8"}, client_ip="127.0.0.1")
+    assert first[0] == 200
+    assert second[0] == 429
+
+
+def test_request_validation_error_redacts_token_and_body_from_response_and_logs(tmp_path, caplog):
+    app = create_app(settings=settings(tmp_path), ledger=Ledger(tmp_path / "redaction.sqlite3"), verifier=FakeVerifier({}))
+    marker_header = "LOCAL-TEST-RAW-JWT-DO-NOT-ECHO"
+    marker_body = "LOCAL-TEST-REVIEWER-SECRET-DO-NOT-ECHO"
+    status, _, body = asgi_request(
+        app, "POST", "/v1/agent/screen-transaction",
+        headers={"skyfire-pay-id": marker_header, "content-type": "application/json"},
+        body=json.dumps({"transaction_id": marker_body, "unknown": marker_header}).encode(),
+    )
+    assert status == 422
+    assert b"request validation failed" in body
+    assert marker_header not in body.decode()
+    assert marker_body not in body.decode()
+    assert marker_header not in caplog.text
+    assert marker_body not in caplog.text
+
+
+def test_v1_threshold_remains_unchanged():
+    assert ANOMALY_THRESHOLD == 0.65
+
+
+def test_screening_route_remains_provider_free_and_ledger_survives_reopen(tmp_path, monkeypatch):
+    from trustguard import TrustGuard
+    from paypal_rest import PayPalRestOrdersProvider
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("HTTP screening must not invoke payment dispatch or reconciliation")
+
+    monkeypatch.setattr(TrustGuard, "authorize_and_dispatch", forbidden)
+    monkeypatch.setattr(TrustGuard, "reconcile", forbidden)
+    monkeypatch.setattr(PayPalRestOrdersProvider, "create_order", forbidden)
+    monkeypatch.setattr(PayPalRestOrdersProvider, "capture_order", forbidden, raising=False)
+    monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "false")
+    app, token, database = local_screening_app(tmp_path, amount="50.00")
+    status, _, body = submit_local_screening(app, token, transaction_id="persistent-screen", idempotency_key="persistent-screen-idem")
+    assert status == 200
+    result = json.loads(body)
+    assert result["paypal_dispatch"] == "DISABLED_NOT_CALLED"
+    reopened = Ledger(database)
+    assert reopened.get("persistent-screen")["status"] == result["transaction_state"]
+    assert reopened.get("persistent-screen")["risk_model_version"]
 
 
 def test_repeated_token_is_accepted_and_never_persisted_or_exposed(tmp_path, monkeypatch, caplog):

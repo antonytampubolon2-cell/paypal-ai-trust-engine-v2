@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install project dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.lock
 
       - name: Validate Python syntax
         run: |
@@ -36,7 +36,7 @@ jobs:
           from pathlib import Path
 
           paths = [
-              Path("app.py"), Path("skyfire_auth.py"), Path("risk_scoring.py"),
+              Path("app.py"), Path("api_security.py"), Path("skyfire_auth.py"), Path("risk_scoring.py"),
               Path("trustguard.py"), Path("paypal_rest.py"),
               Path("scripts/run_local_demo.py"),
               Path("scripts/run_paypal_sandbox_demo.py"),
@@ -46,6 +46,7 @@ jobs:
               Path("scripts/evaluate_candidate_v2.py"),
               Path("benchmark_v3_data.py"), Path("risk_candidate_v3.py"),
               Path("benchmark_v3_evaluation.py"), Path("scripts/evaluate_benchmark_v3.py"),
+              Path("tests/conftest.py"),
               *Path("tests").glob("test_*.py"),
           ]
           for path in paths:
@@ -83,6 +84,8 @@ jobs:
           SKYFIRE_SELLER_AGENT_ACCOUNT_ID: ci-test-seller-account-not-a-credential
           SKYFIRE_SELLER_SERVICE_ID: ci-test-seller-service-not-a-credential
           TRUSTGUARD_ENABLE_PAYPAL_SANDBOX: "false"
+          TRUSTGUARD_OPENAPI_ENABLED: "true"
+          TRUSTGUARD_ALLOWED_HOSTS: "localhost,127.0.0.1,testserver"
         run: |
           set -euo pipefail
           name=trustguard-ci-smoke
@@ -101,6 +104,8 @@ jobs:
             --env SKYFIRE_SELLER_AGENT_ACCOUNT_ID \
             --env SKYFIRE_SELLER_SERVICE_ID \
             --env TRUSTGUARD_ENABLE_PAYPAL_SANDBOX \
+            --env TRUSTGUARD_OPENAPI_ENABLED \
+            --env TRUSTGUARD_ALLOWED_HOSTS \
             "$image"
 
           ready=false
@@ -118,7 +123,7 @@ jobs:
           python -c 'import json; assert json.load(open("/tmp/trustguard-health.json"))["status"] == "ok"'
 
           curl --fail --silent --show-error http://127.0.0.1:18080/openapi.json \
-            | python -c 'import json,sys; spec=json.load(sys.stdin); assert "/v1/agent/authorize" in spec["paths"]; params=spec["paths"]["/v1/agent/authorize"]["post"]["parameters"]; assert any(p["in"] == "header" and p["name"] == "skyfire-pay-id" and p["required"] for p in params)'
+            | python -c 'import json,sys; from openapi_spec_validator import validate; spec=json.load(sys.stdin); validate(spec); assert "/v1/agent/authorize" in spec["paths"]; params=spec["paths"]["/v1/agent/authorize"]["post"]["parameters"]; assert any(p["in"] == "header" and p["name"] == "skyfire-pay-id" and p["required"] for p in params)'
 
           docker exec "$name" python -c 'import os; assert os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() == "false"'
           echo "Container health, OpenAPI, and disabled-dispatch checks passed"
