@@ -4,9 +4,13 @@ This repository includes a FastAPI service for validating Skyfire KYAPay tokens.
 
 **Demo limitation:** no actual Skyfire-issued Sandbox token has been verified by this project, and no PayPal Sandbox order/capture success is claimed or shown. Tests use generated tokens and mock provider responses only. Confirm Skyfire onboarding metadata before accepting real tokens.
 
-The previous implementation mixed `skyfire-pay-id` transport with draft-generation `tsi` claims. The API now requires one explicit `SKYFIRE_PROTOCOL_PROFILE` and never falls back between profiles: `legacy-published` uses exactly one `skyfire-pay-id` JWT with `ssi`; `ietf-draft-2026-11` uses the November 2026 working-draft `KYAPay-Token` Structured Field List with `tsi`. The latter is an Internet-Draft, not a finalized standard. Both profiles require separately configured trusted issuer/JWKS, audience, Sandbox environment, and Seller Service binding. No actual account has been confirmed for either profile, so neither is approved for this Seller Service.
+The API supports two **separate, explicitly selected protocol profiles**. Set `SKYFIRE_PROTOCOL_PROFILE` to exactly one of `legacy-published` or `ietf-draft-2026-11`; the verifier does not infer a profile from an incoming request. Each profile has its own header parser, token/claim validation, audience semantics, and service-identity binding. A request containing the other profile's header or service claim is rejected. There is no silent fallback or mixed-profile acceptance. The `ietf-draft-2026-11` behavior follows a work-in-progress Internet-Draft, not a finalized standard. **Neither profile has been confirmed for the actual operator account or a registered Seller Service.**
 
-For the published profile, `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, `env`, and `ssi` are required; the audience is configured to the Seller Agent Account ID, and published `sub`/`jti` UUID requirements are enforced. For the draft, common `iss`, `sub`, `aud`, `iat`, `exp`, `jti` and `tsi` are required; `env` is optional in draft -03, but if present must match the configured Sandbox. Draft `aud` must be configured as the exact Target identity audience, not assumed to be a Seller Agent Account ID. Both profiles enforce ES256, `kid`, a fixed configured HTTPS issuer/JWKS origin, exact audience and target-service binding. Payment profiles validate positive decimal-string `amt` and `val`, a three-letter currency, and profile-appropriate settlement metadata; the draft additionally validates supported `tps`, `tpr`, `mnr`, and `sti` shapes. The API does not return or store `sti` or `val`. Draft list parsing accepts members of at least 6144 octets, rejects malformed lists as a whole, and the current screening API intentionally accepts exactly one token per operation. Token-dependent responses include `Vary` and `Cache-Control: private, no-store`.
+**`legacy-published` profile:** one JWT in the `skyfire-pay-id` HTTP header; the Seller Service identity must be the configured `ssi` claim. It requires `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, `env`, and `ssi`; `aud` is bound to the configured Seller Agent Account ID, and `sub` and `jti` follow the published profile's UUID checks. A `tsi` claim is rejected rather than used as a substitute.
+
+**`ietf-draft-2026-11` profile:** one token member in the `KYAPay-Token` Structured Field List header; the Seller Service identity must be the configured `tsi` claim. It requires `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, and `tsi`; `env` may be absent under draft-03 but, when present, must match the configured Sandbox environment. `aud` must equal the separately configured exact expected audience; the code does not assume it is a Seller Agent Account ID. An `ssi` claim is rejected rather than used as a substitute. This draft profile is not evidence of account onboarding approval.
+
+Both profiles enforce ES256, `kid`, a configured HTTPS issuer/JWKS pair, signature and claim validation, and service-identity binding. They apply profile-aware payment-claim checks, including positive decimal-string `amt`/`val`, currency and settlement metadata. The draft adapter additionally validates the supported `tps`, `tpr`, `mnr`, and `sti` shapes. The API does not return or store `sti` or `val`. The draft header parser rejects malformed lists; this screening API accepts exactly one token per operation. Token-dependent responses include `Vary` and `Cache-Control: private, no-store`.
 
 `SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED` defaults to false. The API remains unready until the operator has confirmed the actual Seller Service and its profile-specific configuration from authoritative Skyfire Dashboard/support evidence, then explicitly sets this flag to `true`. Individual identity/KYA verification does not create or approve a Seller Service. Never use synthetic test values in this setting.
 
@@ -32,9 +36,9 @@ Immediately after signed access-token and DPoP verification, authenticated grant
 
 The static `dashboard_v2.html` can display the `risk_assessment.explanation` returned with sample data or a locally selected screening response. It also accepts the complete JSON report emitted by the offline judge demo and renders scenario decisions, scores, durable states and the `SIMULATED` / `NOT_DISPATCHED` labels. Imported files are explicitly presented as local, unverified evidence; the dashboard does not connect to the backend, run inference, or represent a real Sandbox transaction. Explanation fields are deterministic rule annotations describing scored signals; they are **not causal feature attribution** from the IsolationForest. They cannot override a persisted decision or authorize, release, or dispatch payment. Invalid or unrelated imported JSON is rejected, and displayed fields use text rendering rather than HTML interpretation.
 
-The screening route binds currency to the signed token and obtains Skyfire `tsi` only from verified claims. The request body has no payee or merchant-ID field. Signed `amt` is treated as the maximum authorized amount. Requests above that cap are rejected; lower amounts remain within the signed ceiling. A deterministic grant-ledger identity is derived from verified issuer, subject, audience, and service ID. The screen-only state `SCREENED_ALLOW` is distinct from provider dispatch. HOLD and ALLOW reservations remain counted against cumulative ledger limits unless an authenticated reviewer releases a still-undispatched HOLD as `REVIEW_RELEASED`. Release only abandons the reservation; it never changes the ML HOLD decision into ALLOW, authorizes payment, or starts dispatch. Risk evidence is persisted in SQLite. The screening route never constructs a provider and reports `paypal_dispatch: DISABLED_NOT_CALLED`. PayPal Sandbox dispatch remains opt-in and disabled by default elsewhere.
+The screening route binds currency to the signed token and obtains the normalized Seller Service ID only from the selected profile's verified identity claim (`ssi` for `legacy-published`; `tsi` for `ietf-draft-2026-11`). The request body has no payee or merchant-ID field. Signed `amt` is treated as the maximum authorized amount. Requests above that cap are rejected; lower amounts remain within the signed ceiling. A deterministic grant-ledger identity is derived from verified issuer, subject, audience, and normalized service ID. The screen-only state `SCREENED_ALLOW` is distinct from provider dispatch. HOLD and ALLOW reservations remain counted against cumulative ledger limits unless an authenticated reviewer releases a still-undispatched HOLD as `REVIEW_RELEASED`. Release only abandons the reservation; it never changes the ML HOLD decision into ALLOW, authorizes payment, or starts dispatch. Risk evidence is persisted in SQLite. The screening route never constructs a provider and reports `paypal_dispatch: DISABLED_NOT_CALLED`. PayPal Sandbox dispatch remains opt-in and disabled by default elsewhere.
 
-Skyfire `tsi` and PayPal merchant ID are separate identifier namespaces and are persisted separately as `skyfire_service_id` and `paypal_merchant_id`. The trusted server-side mapping requires `TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID` (must exactly equal `SKYFIRE_SELLER_SERVICE_ID`) and `TRUSTGUARD_PAYPAL_MERCHANT_ID`. Neither value is accepted from the screening request. If mapping values are missing or inconsistent, the response says `paypal_integration_status: NOT_CONFIGURED` and the ledger stores no PayPal merchant ID. A configured mapping says only `CONFIGURED`; it does not enable or invoke PayPal.
+The selected profile's Seller Service ID and PayPal merchant ID are separate identifier namespaces and are persisted separately as `skyfire_service_id` and `paypal_merchant_id`. The trusted server-side mapping requires `TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID` (must exactly equal `SKYFIRE_SELLER_SERVICE_ID`) and `TRUSTGUARD_PAYPAL_MERCHANT_ID`. Neither value is accepted from the screening request. If mapping values are missing or inconsistent, the response says `paypal_integration_status: NOT_CONFIGURED` and the ledger stores no PayPal merchant ID. A configured mapping says only `CONFIGURED`; it does not enable or invoke PayPal.
 
 Administrative review is disabled unless both `TRUSTGUARD_REVIEWER_ID` and `TRUSTGUARD_REVIEWER_CREDENTIAL` are present. Reviewer identity is server-configured; the credential is compared in constant time and never returned or logged. The durable audit records reviewer ID, decision, reason, and timestamp. Only an exact repeat of the same authenticated decision/reason is idempotent; conflicting later reviews are rejected. `UNKNOWN`, `DISPATCH_STARTED`, any non-HOLD state, and any row with a provider order ID cannot be released. Keep the reviewer credential in a secret manager/environment injection, never in source, README examples, or shell history.
 
@@ -124,18 +128,38 @@ The report records confusion matrices, precision, recall, F1, ROC-AUC, average p
 
 ## Required environment variables
 
-The API fails closed unless these variables are set:
+The API fails closed unless one supported profile is explicitly selected and the required configuration is provided. **The examples below are configuration templates only, not account instructions.** Do not set account-confirmation to true or provide guessed values. Obtain actual values from authoritative Seller Service onboarding/support evidence first.
 
-- `SKYFIRE_ISSUER`: trusted issuer origin. For the only supported configuration in this version, set it to `https://app-sandbox.skyfire.xyz`.
-- `SKYFIRE_JWKS_URL`: trusted key-set URL. For this supported Sandbox configuration, set it to `https://app-sandbox.skyfire.xyz/.well-known/jwks.json`.
-- `SKYFIRE_EXPECTED_ENVIRONMENT`: expected token `env`; this Sandbox-only implementation requires `sandbox`.
-- `SKYFIRE_SELLER_AGENT_ACCOUNT_ID`: configured Seller Agent Account ID; must exactly match `aud`.
-- `SKYFIRE_SELLER_SERVICE_ID`: configured Seller Service ID; must exactly match draft-03 `tsi` (Target Service ID). Legacy `ssi` is not accepted as a substitute.
-- `TRUSTGUARD_DATABASE_PATH`: durable SQLite file path used by the TrustGuard transaction ledger. `:memory:` is rejected. The container sets `/data/trustguard.sqlite3` and the `/data` volume should be persistent.
+Common configuration names for either profile:
 
-Optional integration-specific variable:
+- `SKYFIRE_PROTOCOL_PROFILE`: required explicit selector: `legacy-published` or `ietf-draft-2026-11`.
+- `SKYFIRE_ISSUER`: trusted issuer origin. The current verifier only permits the documented Sandbox issuer/JWKS pair described below; this does not establish that the operator account is onboarded to it.
+- `SKYFIRE_JWKS_URL`: trusted key-set URL, restricted to the configured issuer's well-known endpoint.
+- `SKYFIRE_EXPECTED_ENVIRONMENT`: must be `sandbox` in this Sandbox-only implementation.
+- `SKYFIRE_SELLER_AGENT_ACCOUNT_ID`: configured Seller Agent Account ID. Its relationship to `aud` is profile-specific; do not assume one profile's semantics apply to the other.
+- `SKYFIRE_SELLER_SERVICE_ID`: actual configured Seller Service ID; the selected profile binds this to its own service claim (`ssi` or `tsi`). No service is currently confirmed for this account.
+- `TRUSTGUARD_DATABASE_PATH`: durable SQLite file path; `:memory:` is rejected. The container defaults to `/data/trustguard.sqlite3`, which requires a persistent mount for durable deployment.
+- `SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED`: defaults false. Keep false until the actual account's Seller Service and selected profile configuration have been authoritatively verified.
 
-- `SKYFIRE_TARGET_DOMAIN`: set only when this integration identifies its target by domain. When set, token `tdm` must exactly match this value. When unset, `tdm` is not required or returned.
+**Legacy-only audience rule:** `SKYFIRE_EXPECTED_AUDIENCE` may be omitted because this profile defaults it to `SKYFIRE_SELLER_AGENT_ACCOUNT_ID`; the configured `aud` must match that account ID. Do not use this rule for the draft profile.
+
+**Draft-only audience rule:** `SKYFIRE_EXPECTED_AUDIENCE` must be explicitly configured to the exact audience confirmed for the account. The code does not infer it from `SKYFIRE_SELLER_AGENT_ACCOUNT_ID`. Draft `env` may be absent in the token, but any supplied `env` must match the configured Sandbox environment.
+
+**Draft-only optional integration setting:** `SKYFIRE_TARGET_DOMAIN` may be set only when the account's confirmed target identity uses a domain; when set, token `tdm` must exactly match. When unset, `tdm` is not required or returned.
+
+Profile-labeled selector templates (placeholders intentionally contain no invented account values):
+
+```bash
+# LEGACY PUBLISHED PROFILE — use only after authoritative account confirmation.
+export SKYFIRE_PROTOCOL_PROFILE=legacy-published
+export SKYFIRE_EXPECTED_AUDIENCE="${SKYFIRE_SELLER_AGENT_ACCOUNT_ID:?set the confirmed account ID}"
+```
+
+```bash
+# NOVEMBER 2026 DRAFT PROFILE — work-in-progress draft; use only if the account confirms it.
+export SKYFIRE_PROTOCOL_PROFILE=ietf-draft-2026-11
+export SKYFIRE_EXPECTED_AUDIENCE="${CONFIRMED_DRAFT_AUDIENCE:?set the exact account-confirmed audience}"
+```
 
 Optional trusted Skyfire-to-PayPal mapping (both must be set; otherwise `paypal_integration_status` is `NOT_CONFIGURED` and no merchant ID is stored; neither enables PayPal dispatch):
 
@@ -147,13 +171,13 @@ Optional administrative HOLD review (both must be set; otherwise the review endp
 - `TRUSTGUARD_REVIEWER_ID`: server-configured reviewer identity recorded in the audit trail.
 - `TRUSTGUARD_REVIEWER_CREDENTIAL`: reviewer secret compared in constant time against the `x-trustguard-reviewer-credential` header; keep it in secret storage and never print, log, or commit it.
 
-The implementation accepts only the documented Sandbox issuer/JWKS pair above, requires HTTPS, checks that JWKS is the well-known URI formed from the configured issuer, and never derives a URL from the token's untrusted `iss`. The configured expected environment must be `sandbox`. It uses ES256 only; requires `kid` and `typ` (`kya+jwt`, `pay+jwt`, or `kya-pay+jwt`); validates signature, `iss`, `aud`, `env`, `tsi`, `iat`, `exp`, and UUID `jti`; and caches validated public keys for 300 seconds. The cache does not refresh on attacker-supplied unknown `kid` values. For PAY/KYA-PAY, it additionally validates positive `amt`/`val`, `cur=USD`, `stp` in `coin`/`card`/`bank`, and `sti.verified=true` without returning or storing `sti`.
+The current verifier supports the documented Sandbox issuer/JWKS pair above, requires HTTPS, checks that JWKS is the well-known URI formed from the configured issuer, and never derives a URL from the token's untrusted `iss`. This Sandbox restriction applies to both code profiles but does not prove account-level support. It uses ES256 only; requires `kid` and `typ` (`kya+jwt`, `pay+jwt`, or `kya-pay+jwt`); and caches validated public keys for 300 seconds. Profile-specific checks are distinct: `legacy-published` requires `env`, `ssi`, and UUID-form `sub`/`jti`; `ietf-draft-2026-11` requires `tsi`, permits absent `env` but checks it if present, and does not apply the legacy UUID rule. Each validates signature, `iss`, `aud`, times, and the selected service claim. The cache does not refresh on attacker-supplied unknown `kid` values. PAY/KYA-PAY tokens additionally require positive `amt`/`val`, a three-letter currency, and profile-specific supported settlement metadata, without returning or storing `sti`.
 
 ### Sandbox issuer/JWKS source and limits
 
 Skyfire's official verification guide lists `https://app-sandbox.skyfire.xyz/.well-known/jwks.json` as the Sandbox JWKS endpoint (the production key URL is separate). KYAPay Internet-Draft version 03 specifies that the JWKS URI is formed from the trusted `iss` origin by appending `/.well-known/jwks.json`. Together these official sources support the configured Sandbox pair `https://app-sandbox.skyfire.xyz` plus its documented JWKS URL. The implementation requires both values explicitly and rejects other pairs. [Skyfire Verify and Extract Data](https://docs.skyfire.xyz/docs/verify-and-extract-data-from-tokens) [KYAPay Internet-Draft](https://datatracker.ietf.org/doc/draft-skyfire-oauth-kyapay-token/)
 
-The code has not inspected an actual Sandbox-issued token. Before accepting tokens outside local tests, compare the token's actual `iss`, `env`, `aud`, and `tsi` with the configured Sandbox values and confirm the Skyfire onboarding service identifier. If Skyfire's actual Sandbox metadata differs, stop and obtain confirmation before changing the allowlisted pair; do not substitute a guessed issuer or key URL. `https://api-qa.skyfire.xyz/api/v1/tokens` is a token-creation API, not a JWKS endpoint, and is not used here.
+The code has not inspected an actual Sandbox-issued token, and no profile has been confirmed for this account. Before accepting tokens outside local tests, obtain authoritative account evidence for the selected profile's actual `iss`, `aud`, environment rules, service claim/ID, token types, and JWKS procedure. If the account metadata differs from the supported configuration or profile rules, stop and obtain confirmation before changing the implementation; do not substitute a guessed issuer or key URL. `https://api-qa.skyfire.xyz/api/v1/tokens` is a token-creation API, not a JWKS endpoint, and is not used here.
 
 ## Other environment variables in existing code
 
@@ -274,7 +298,9 @@ The DPoP replay case in `scripts/run_local_demo.py` invokes the existing proof v
 
 Focused automated demo checks: `pytest -q tests/test_local_demo.py`. Existing route tests remain available with `pytest -q tests/test_skyfire_api.py -k 'local_test_only'`.
 
-For an actual configured service, the request contract is:
+For an actual configured service, send exactly the header for the explicitly selected and account-confirmed profile. The following are **separate illustrative wire shapes**, not valid tokens, credentials, or proof that either profile is enabled. Do not send both headers. In either case the API accepts one token per operation.
+
+**Request shape — `legacy-published` (`skyfire-pay-id` header; `ssi` claim):**
 
 ```http
 POST /v1/agent/screen-transaction
@@ -284,13 +310,25 @@ Content-Type: application/json
 {"transaction_id":"<unique-local-id>","idempotency_key":"<unique-idempotency-key>","amount":"<positive USD amount not above signed amt>","currency":"USD"}
 ```
 
+**Request shape — `ietf-draft-2026-11` (`KYAPay-Token` Structured Field List; `tsi` claim):**
+
+```http
+POST /v1/agent/screen-transaction
+KYAPay-Token: <valid, issuer-signed PAY or KYA-PAY token>
+Content-Type: application/json
+
+{"transaction_id":"<unique-local-id>","idempotency_key":"<unique-idempotency-key>","amount":"<positive USD amount not above signed amt>","currency":"USD"}
+```
+
+The draft header is parsed as a Structured Field List of bare token members; this operation rejects more than one member as ambiguous. These examples show header selection only—the placeholder is not a syntactically usable JWT, and the request is accepted only when its token and profile-specific claims validate.
+
 The response reports authenticated `skyfire_service_id` separately from trusted `paypal_merchant_id` (or null if `NOT_CONFIGURED`). Do not include a merchant ID in the request; extra fields are rejected. An allowed screening is not PayPal authorization or an order; the response states that PayPal dispatch was not called. No HTTP route creates or captures orders.
 
 For hold review, inject both reviewer variables from secure environment configuration, then send `POST /v1/admin/transactions/{transaction_id}/review` with `x-trustguard-reviewer-credential` and JSON such as `{"decision":"RELEASE_RESERVATION","reason":"reviewed under approved operational procedure"}`. The server uses the configured reviewer identity. This only releases a still-undispatched HOLD reservation; it never approves or dispatches payment. If reviewer configuration is missing, the endpoint returns service unavailable without reviewing anything.
 
 The GitHub Actions workflow runs on pushes to the remediation branch, pull requests targeting `main`, and manual `workflow_dispatch`. It has `contents: read` permissions, uses Python 3.12 to match the Docker base image, runs syntax validation and all tests, and builds/runs a local container smoke test without publishing an image. Its smoke test uses synthetic non-secret seller identifiers and never requests provider credentials.
 
-To run the API locally, provide the required variables from the authorized Sandbox onboarding/configuration, explicitly keep dispatch disabled, then use:
+**Profile-neutral local launch command:** first select exactly one profile using the profile-labeled templates above and supply its required values from authorized Sandbox onboarding/configuration. Keep `SKYFIRE_ACCOUNT_CONFIGURATION_CONFIRMED=false` until evidence is verified, and explicitly keep dispatch disabled. This command does not choose a profile or provide profile-specific account values:
 
 ```bash
 export TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false
@@ -299,11 +337,13 @@ export TRUSTGUARD_ALLOWED_HOSTS=127.0.0.1,localhost
 uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
 ```
 
-The OpenAPI environment switch above is for local inspection only. Open the localhost health/OpenAPI URLs only after the schema is deliberately enabled and one explicit profile is configured. Without a selected profile, OpenAPI and profile routes are disabled/unready. The service fetches only the configured JWKS when a token request needs a key-cache refresh; offline tests inject fake JWKS and prohibit real network connections. Do not use real settlement tokens in an untrusted local environment. The account has not confirmed either candidate profile.
+The OpenAPI environment switch above is for local inspection only. Open the localhost health/OpenAPI URLs only after the schema is deliberately enabled and one explicit profile is configured. Without a selected profile, OpenAPI and profile routes are disabled/unready. The service fetches only the configured JWKS when a token request needs a key-cache refresh; offline tests inject fake JWKS and prohibit real network connections. Do not use real settlement tokens in an untrusted local environment. No account-specific evidence has confirmed either candidate profile.
 
 ## Container preparation
 
-The non-root `Dockerfile` sets `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false`, defaults `PORT` to 8000 and the database to `/data/trustguard.sqlite3`, and disables OpenAPI publication by default. Build locally with `docker build -t trustguard-local .`. A Docker `VOLUME` declaration alone does not guarantee durable storage; the host must provide a persistent mount. To bind only to localhost, set actual authorized non-secret Sandbox values only when available, then run:
+The non-root `Dockerfile` sets `TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=false`, defaults `PORT` to 8000 and the database to `/data/trustguard.sqlite3`, and disables OpenAPI publication by default. Build locally with `docker build -t trustguard-local .`. A Docker `VOLUME` declaration alone does not guarantee durable storage; the host must provide a persistent mount.
+
+**Generic local Docker launch template (not a protocol-profile configuration):** choose exactly one profile only after authoritative account confirmation and provide all profile-specific values from that profile's confirmed configuration. The variables below are passed through from the operator's environment; no IDs, issuer, audience, URL, token, or credential values are supplied here. Keep dispatch disabled:
 
 ```bash
 docker run --rm --name trustguard-local \
