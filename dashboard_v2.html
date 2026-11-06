@@ -29,10 +29,11 @@
   <section>
     <h2>Risk explanation — static visualization</h2>
     <p>This view only displays explanation fields already present in sample data or a locally selected screening API JSON response. It does not independently verify imported data, run model inference, request tokens, call an external provider, or override a backend decision.</p>
-    <label for="risk-json-file">Load local screening API JSON (optional): </label>
+    <label for="risk-json-file">Load local judge-demo JSON (offline report or screening response): </label>
     <input id="risk-json-file" type="file" accept="application/json,.json">
-    <p id="risk-import-status" class="muted">No local screening response loaded.</p>
+    <p id="risk-import-status" class="muted">No local demo report loaded. Imported files are displayed as unverified local evidence.</p>
     <div id="risk-assessment" class="muted">No valid risk assessment is available.</div>
+    <div id="scenario-report" class="muted">No offline scenario report loaded.</div>
   </section>
   <div class="grid" id="controls"></div>
   <section><h2>Transaction evidence</h2><div id="transaction" class="muted">No live transaction evidence is connected.</div></section>
@@ -60,7 +61,8 @@ function validNonEmptyString(value) {
 }
 function validRiskAssessment(data) {
   const assessment = isRecord(data) ? data.risk_assessment : null;
-  if (!isRecord(assessment) || !Number.isFinite(assessment.anomaly_score) || assessment.anomaly_score < 0 || assessment.anomaly_score > 1 || !validNonEmptyString(assessment.model_version) || !validNonEmptyString(assessment.training_dataset_id) || !validNonEmptyString(assessment.scored_at) || !validNonEmptyString(assessment.decision)) return null;
+  const validScoredAt = assessment && ((typeof assessment.scored_at === 'number' && Number.isFinite(assessment.scored_at)) || validNonEmptyString(assessment.scored_at));
+  if (!isRecord(assessment) || !Number.isFinite(assessment.anomaly_score) || assessment.anomaly_score < 0 || assessment.anomaly_score > 1 || !validNonEmptyString(assessment.model_version) || !validNonEmptyString(assessment.training_dataset_id) || !validScoredAt || !validNonEmptyString(assessment.decision)) return null;
   const explanation = assessment.explanation;
   if (!isRecord(explanation) || !validNonEmptyString(explanation.version) || !Array.isArray(explanation.reason_codes) || !explanation.reason_codes.every(validNonEmptyString) || !validNonEmptyString(explanation.summary) || !Array.isArray(explanation.feature_signals) || !validNonEmptyString(explanation.method)) return null;
   if (!explanation.feature_signals.every(signal => isRecord(signal) && validNonEmptyString(signal.feature) && Number.isFinite(signal.value) && validNonEmptyString(signal.reason_code) && validNonEmptyString(signal.description))) return null;
@@ -91,6 +93,39 @@ function renderRiskAssessment(assessment, source) {
     addText(target, `${signal.feature} — description`, signal.description);
   }
 }
+function validOfflineReport(data) {
+  return isRecord(data) && validNonEmptyString(data.disclaimer) && data.disclaimer.includes('LOCAL TEST ONLY')
+    && Array.isArray(data.scenarios) && data.scenarios.length > 0
+    && data.scenarios.every(item => isRecord(item) && validNonEmptyString(item.scenario)
+      && item.execution_label === 'SIMULATED' && item.payment_status === 'NOT_DISPATCHED');
+}
+function renderOfflineReport(data) {
+  const target = document.getElementById('scenario-report');
+  target.textContent = '';
+  addText(target, 'Evidence source', 'Local file (not independently verified)');
+  addText(target, 'Execution', 'SIMULATED — no PayPal transaction or payment');
+  addText(target, 'Disclaimer', data.disclaimer);
+  for (const item of data.scenarios) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    addText(card, 'Scenario', item.scenario);
+    addText(card, 'Execution label', item.execution_label);
+    addText(card, 'Risk decision', item.risk_decision || item.decision || 'not scored');
+    addText(card, 'Anomaly ranking score (not fraud probability)', Number.isFinite(item.anomaly_score) ? item.anomaly_score : 'not applicable');
+    addText(card, 'Model version', item.model_version || 'not reported');
+    addText(card, 'Training dataset ID', item.training_dataset_id || 'not reported');
+    addText(card, 'Scored at', item.scored_at ?? 'not reported');
+    if (isRecord(item.explanation)) {
+      addText(card, 'Explanation', item.explanation.summary || 'No explanation summary reported');
+      addText(card, 'Explanation method', item.explanation.method || 'not reported');
+    }
+    addText(card, 'Durable ledger state', item.durable_ledger_state || 'not applicable');
+    addText(card, 'Payment status', item.payment_status);
+    if (item.reason_code) addText(card, 'Reason', item.reason_code);
+    target.append(card);
+  }
+  document.getElementById('risk-assessment').textContent = 'Risk evidence is displayed in the imported scenario cards above; it remains simulated and is not a fraud probability.';
+}
 const controls = document.getElementById('controls');
 for (const label of ['JWT signature verification', 'DPoP proof verification', 'Durable grant ledger', 'Fraud risk scoring']) {
   const card = document.createElement('div');
@@ -109,28 +144,39 @@ const riskImportStatus = document.getElementById('risk-import-status');
 riskFileInput.addEventListener('change', event => {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
+  importedRiskAssessment = true;
+  document.getElementById('scenario-report').textContent = 'Validating selected local file...';
+  showRiskUnavailable('No valid risk assessment was loaded.');
   const reader = new FileReader();
-  reader.onload = () => {
-    let parsed;
+    reader.onload = () => {
+      let parsed;
     try {
       parsed = JSON.parse(String(reader.result));
-    } catch {
+      } catch {
       riskImportStatus.textContent = 'Rejected: selected file is not valid JSON.';
+      document.getElementById('scenario-report').textContent = 'Rejected file; no scenario evidence is displayed.';
       showRiskUnavailable('No valid risk assessment was loaded.');
-      return;
-    }
-    const assessment = validRiskAssessment(parsed);
+        return;
+      }
+      if (validOfflineReport(parsed)) {
+        riskImportStatus.textContent = 'Loaded a LOCAL TEST ONLY scenario report for display; all rows remain SIMULATED / NOT_DISPATCHED.';
+        renderOfflineReport(parsed);
+        return;
+      }
+      const assessment = validRiskAssessment(parsed);
     if (!assessment) {
       riskImportStatus.textContent = 'Rejected: JSON must contain a valid risk_assessment object.';
+      document.getElementById('scenario-report').textContent = 'Rejected file; no scenario evidence is displayed.';
       showRiskUnavailable('No valid risk assessment was loaded.');
       return;
     }
-    importedRiskAssessment = true;
     riskImportStatus.textContent = 'Loaded a local screening response for display only.';
+    document.getElementById('scenario-report').textContent = 'No offline scenario report in this file.';
     renderRiskAssessment(assessment, 'Local file (not independently verified)');
   };
   reader.onerror = () => {
     riskImportStatus.textContent = 'Rejected: local file could not be read.';
+    document.getElementById('scenario-report').textContent = 'Rejected file; no scenario evidence is displayed.';
     showRiskUnavailable('No valid risk assessment was loaded.');
   };
   reader.readAsText(file);

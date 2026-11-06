@@ -313,6 +313,9 @@ def run_demo():
                 "scenario": name, "transaction_id": result["transaction_id"],
                 "risk_decision": result["status"], "anomaly_score": result["risk_assessment"]["anomaly_score"],
                 "model_version": result["risk_assessment"]["model_version"],
+                "training_dataset_id": result["risk_assessment"]["training_dataset_id"],
+                "scored_at": result["risk_assessment"]["scored_at"],
+                "explanation": result["risk_assessment"]["explanation"],
                 "durable_ledger_state": result["transaction_state"], "reason_code": result["reason_code"],
                 "execution_label": "SIMULATED", "payment_status": "NOT_DISPATCHED",
             }

@@ -30,6 +30,9 @@ def test_run_demo_exercises_real_http_routes_and_security_scenarios():
 
     assert scenarios["A — LOW RISK"]["risk_decision"] == "ALLOW"
     assert scenarios["A — LOW RISK"]["durable_ledger_state"] == "SCREENED_ALLOW"
+    assert scenarios["A — LOW RISK"]["training_dataset_id"]
+    assert scenarios["A — LOW RISK"]["scored_at"] > 0
+    assert scenarios["A — LOW RISK"]["explanation"]["method"]
     assert scenarios["B — HIGH RISK"]["risk_decision"] == "HOLD"
     assert scenarios["B — HIGH RISK"]["durable_ledger_state"] == "HOLD"
 

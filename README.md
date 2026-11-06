@@ -26,7 +26,7 @@ The estimator is `sklearn.ensemble.IsolationForest`, versioned as `trustguard-is
 
 Immediately after signed access-token and DPoP verification, authenticated grant currency/payee/limit checks, and the durable spending reservation—and before persisting `DISPATCH_STARTED` or calling any provider—the guard derives four features from the canonical transaction and existing ledger: `amount_to_grant_ratio`, `cumulative_spending_ratio`, `recent_velocity_ratio` (prior active transactions in the preceding ten minutes, normalized/capped at five), and `new_payee`. No caller-supplied risk feature is accepted. The model's IsolationForest margin is sigmoid-mapped to a 0–1 **anomaly ranking score**, with `HOLD` at score ≥0.65. This is not a calibrated probability of fraud, and this synthetic model is not validated for production or payment authorization.
 
-The static `dashboard_v2.html` can display the `risk_assessment.explanation` returned with sample data or from a locally selected screening API JSON response. These explanation fields are deterministic rule annotations describing the scored signals; they are **not causal feature attribution** from the IsolationForest and are not independently verified by the dashboard. The explanation is informational only and cannot override the persisted screening decision or authorize, release, or dispatch a payment. Invalid or unrelated imported JSON is rejected without being rendered.
+The static `dashboard_v2.html` can display the `risk_assessment.explanation` returned with sample data or a locally selected screening response. It also accepts the complete JSON report emitted by the offline judge demo and renders scenario decisions, scores, durable states and the `SIMULATED` / `NOT_DISPATCHED` labels. Imported files are explicitly presented as local, unverified evidence; the dashboard does not connect to the backend, run inference, or represent a real Sandbox transaction. Explanation fields are deterministic rule annotations describing scored signals; they are **not causal feature attribution** from the IsolationForest. They cannot override a persisted decision or authorize, release, or dispatch payment. Invalid or unrelated imported JSON is rejected, and displayed fields use text rendering rather than HTML interpretation.
 
 The screening route binds currency to the signed token and obtains Skyfire `tsi` only from verified claims. The request body has no payee or merchant-ID field. Signed `amt` is treated as the maximum authorized amount. Requests above that cap are rejected; lower amounts remain within the signed ceiling. A deterministic grant-ledger identity is derived from verified issuer, subject, audience, and service ID. The screen-only state `SCREENED_ALLOW` is distinct from provider dispatch. HOLD and ALLOW reservations remain counted against cumulative ledger limits unless an authenticated reviewer releases a still-undispatched HOLD as `REVIEW_RELEASED`. Release only abandons the reservation; it never changes the ML HOLD decision into ALLOW, authorizes payment, or starts dispatch. Risk evidence is persisted in SQLite. The screening route never constructs a provider and reports `paypal_dispatch: DISABLED_NOT_CALLED`. PayPal Sandbox dispatch remains opt-in and disabled by default elsewhere.
 
@@ -174,9 +174,9 @@ These optional variables apply only to the separate PayPal Sandbox adapter, not 
 
 ## Operator-run LOCAL SANDBOX checkout (not verified Skyfire integration)
 
-`scripts/run_paypal_sandbox_demo.py` is a separate, explicitly opted-in localhost CLI, **not** a new public FastAPI payment endpoint. It can create an actual PayPal Sandbox order, show its provider-returned buyer approval URL, accept manual order-ID completion and explicit terminal confirmation, capture, and reconcile. A callback is not required to complete approval. This flow has only been validated with mocked HTTP responses during implementation; no genuine Sandbox order or capture is claimed by this repository.
+The unified launcher routes only to the separate, explicitly acknowledged localhost Sandbox CLI; it does not add a public FastAPI payment endpoint. The existing `scripts/run_paypal_sandbox_demo.py` workflow shows its allowlisted model decision/score/explanation, creates an order only after `ALLOW`, labels `ORDER_CREATED`, then requires manual order-ID matching, the operator's explicit `APPROVE` entry, and a PayPal GET that independently verifies `APPROVED` before capture. It reports `CAPTURE_COMPLETED` only after final verified reconciliation; ambiguous outcomes remain `UNKNOWN` with no automatic retry. A callback is not used as proof. Tests use mocked HTTP responses only; no genuine Sandbox order or capture is claimed by this repository.
 
-Install the existing `requirements.txt`, then securely inject all of these settings on your own local machine (never paste secrets into source, logs, command history, or this README):
+Install the reviewed exact pins from `requirements.lock`, then securely inject all of these settings on your own local machine (never paste secrets into source, logs, command history, or this README):
 
 | Variable | Purpose |
 | --- | --- |
@@ -189,10 +189,10 @@ Install the existing `requirements.txt`, then securely inject all of these setti
 | `TRUSTGUARD_PAYPAL_MERCHANT_ID` | Operator-confirmed receiving Sandbox merchant account ID; distinct from the service ID. |
 | `TRUSTGUARD_DATABASE_PATH` | Persistent file-backed SQLite ledger retained for ambiguous-outcome reconciliation. |
 
-Then run locally:
+For a separately gated, operator-controlled actual PayPal Sandbox checkout, explicitly select Sandbox mode and acknowledge that it may create a Sandbox order:
 
 ```bash
-python scripts/run_paypal_sandbox_demo.py
+python scripts/run_judge_demo.py --mode sandbox --confirm-sandbox
 ```
 
 For example, these **non-secret synthetic test settings** need no official Skyfire onboarding:
@@ -230,11 +230,19 @@ pytest -q
 
 ### LOCAL TEST ONLY screening demonstration
 
-After installing `requirements.lock`, run the full offline demonstration from the repository root with one command:
+After installing `requirements.lock`, the unified judge entry point runs the full offline demonstration by default:
 
 ```bash
-python scripts/run_local_demo.py
+python scripts/run_judge_demo.py --mode offline
 ```
+
+To load the generated scenario evidence into the static dashboard, save the JSON output and open `dashboard_v2.html` locally:
+
+```bash
+python scripts/run_judge_demo.py --mode offline > /tmp/trustguard-judge-demo.json
+```
+
+The dashboard is only a local report viewer; imported rows stay labeled `SIMULATED` and `NOT_DISPATCHED`. The previous direct command, `python scripts/run_local_demo.py`, remains available.
 
 Dependencies are the project's existing PyJWT/cryptography, FastAPI, requests, and scikit-learn (pinned to 1.6.1); the in-process ASGI HTTP test client uses only the Python standard library and requires no httpx or running server. Python 3.12 matches CI and Docker. No provider credentials or environment configuration are required for this runner.
 

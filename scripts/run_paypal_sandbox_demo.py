@@ -11,6 +11,7 @@ import base64
 import hashlib
 import http.server
 import json
+import math
 import os
 import secrets
 import sys
@@ -270,6 +271,30 @@ def _public_result(result: Any) -> dict[str, Any]:
         value = result.get(key)
         if isinstance(value, (str, bool)):
             public[key] = value
+    risk = result.get("risk_assessment")
+    if isinstance(risk, Mapping):
+        score = risk.get("anomaly_score")
+        if score is None or (isinstance(score, (int, float)) and not isinstance(score, bool)
+                             and math.isfinite(float(score)) and 0.0 <= float(score) <= 1.0):
+            decision = risk.get("decision")
+            model = risk.get("model_version")
+            dataset = risk.get("training_dataset_id")
+            explanation = risk.get("explanation")
+            if (decision in ("ALLOW", "HOLD") and isinstance(model, str) and model
+                    and isinstance(dataset, str) and dataset and isinstance(explanation, Mapping)):
+                public["risk_assessment"] = {
+                    "decision": decision,
+                    "anomaly_score": float(score) if score is not None else None,
+                    "model_version": model,
+                    "training_dataset_id": dataset,
+                    "scored_at": risk.get("scored_at") if isinstance(risk.get("scored_at"), (int, float)) else None,
+                    "explanation": {
+                        "summary": explanation.get("summary") if isinstance(explanation.get("summary"), str) else "",
+                        "reason_codes": [item for item in explanation.get("reason_codes", [])
+                                         if isinstance(item, str)] if isinstance(explanation.get("reason_codes"), list) else [],
+                        "method": explanation.get("method") if isinstance(explanation.get("method"), str) else "",
+                    },
+                }
     approval_url = _verified_approval_url(result.get("approval_url"))
     if (approval_url is not None and result.get("provider_order_id")
             and parse_qs(urlsplit(approval_url).query).get("token") == [result["provider_order_id"]]):
@@ -336,8 +361,12 @@ def run_demo(*, input_fn=input, output_fn=print, error_fn=print) -> int:
             transaction,
         )
         public = _public_result(result)
+        public.setdefault("payment_completed", False)
         output_fn(DISCLAIMER)
         output_fn(json.dumps(public, sort_keys=True))
+        if public.get("status") == "HOLD":
+            output_fn("Risk decision HOLD: no PayPal order was created; this runner cannot override HOLD.")
+            return 0
         if public.get("status") == "UNKNOWN":
             output_fn("Checkout stopped: provider outcome is ambiguous; do not retry automatically.")
             return 3
@@ -346,6 +375,8 @@ def run_demo(*, input_fn=input, output_fn=print, error_fn=print) -> int:
         if not isinstance(order_id, str) or not order_id or not isinstance(approval_url, str):
             output_fn("Checkout stopped: no verified PayPal approval URL was returned.")
             return 3
+        output_fn(json.dumps({"stage": "ORDER_CREATED", "status": public.get("status"),
+                              "payment_completed": False}, sort_keys=True))
         state.set_expected_order(order_id)
         output_fn(f"Open this verified PayPal Sandbox approval URL: {approval_url}")
         output_fn("Approve with your Sandbox Personal account, then enter the returned order ID. No callback or port forwarding is required.")
@@ -358,6 +389,15 @@ def run_demo(*, input_fn=input, output_fn=print, error_fn=print) -> int:
         if input_fn("Type APPROVE to capture: ").strip() != "APPROVE":
             output_fn("Checkout stopped: buyer approval was not entered; no capture was attempted.")
             return 0
+        # Independently surface the provider's approval state before entering
+        # the capture method, which performs its own fresh approval GET as well.
+        approval = guard.reconcile(transaction_id)
+        if approval.get("status") != "APPROVED":
+            output_fn(json.dumps({"stage": approval.get("status", "UNKNOWN"),
+                                  "payment_completed": False}, sort_keys=True))
+            output_fn("PayPal did not verify BUYER_APPROVED; no capture was attempted.")
+            return 3
+        output_fn(json.dumps({"stage": "BUYER_APPROVED", "payment_completed": False}, sort_keys=True))
         # Main TrustGuard owns the provider GET APPROVED verification and capture.
         capture_result = guard.capture_approved_order(transaction_id, buyer_approved=True)
         output_fn(json.dumps(_public_result(capture_result), sort_keys=True))
@@ -369,6 +409,7 @@ def run_demo(*, input_fn=input, output_fn=print, error_fn=print) -> int:
         if final_result.get("status") != "COMPLETED" or final_result.get("payment_completed") is not True:
             output_fn("Final reconciliation did not confirm a completed payment; inspect the durable ledger.")
             return 3
+        output_fn(json.dumps({"stage": "CAPTURE_COMPLETED", "payment_completed": True}, sort_keys=True))
         return 0
     except Exception:
         # Do not disclose provider exception text, response bodies, credentials, or

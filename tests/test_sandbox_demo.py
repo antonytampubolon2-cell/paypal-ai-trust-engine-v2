@@ -17,6 +17,7 @@ from skyfire_auth import (
     SkyfireTokenVerifier,
 )
 from trustguard import CanonicalTransaction, ConfigurationError, TrustConfig
+from risk_scoring import RiskAssessment
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,11 +186,12 @@ class DemoFakeSession:
         self.create_payload = None
         self.order_id = None
         self.get_statuses = {
-            "success": ["APPROVED", "COMPLETED", "COMPLETED"],
-            "mismatch": ["APPROVED", "COMPLETED"],
-            "UNKNOWN": ["APPROVED"],
-            "capture_timeout": ["APPROVED"],
+            "success": ["APPROVED", "APPROVED", "COMPLETED", "COMPLETED"],
+            "mismatch": ["APPROVED", "APPROVED", "COMPLETED"],
+            "UNKNOWN": ["APPROVED", "APPROVED"],
+            "capture_timeout": ["APPROVED", "APPROVED"],
             "manual_mismatch": [],
+            "not_approved": ["CREATED"],
         }[outcome].copy()
 
     def post(self, url, **kwargs):
@@ -310,6 +312,16 @@ def test_run_demo_parameterized_outcomes_use_order_id_then_approve_and_no_callba
     assert json_outputs[0]["approval_url"] == (
         "https://www.sandbox.paypal.com/checkoutnow?token=SANDBOX-ORDER-1"
     )
+    assert json_outputs[0]["risk_assessment"]["decision"] == "ALLOW"
+    assert json_outputs[0]["risk_assessment"]["model_version"]
+    assert 0 <= json_outputs[0]["risk_assessment"]["anomaly_score"] <= 1
+    assert json_outputs[0]["risk_assessment"]["explanation"]["method"]
+    stages = [item.get("stage") for item in json_outputs if "stage" in item]
+    provider_outputs = [item for item in json_outputs if "status" in item and "stage" not in item]
+    if outcome == "success":
+        assert stages == ["ORDER_CREATED", "BUYER_APPROVED", "CAPTURE_COMPLETED"]
+    elif outcome in {"mismatch", "UNKNOWN", "capture_timeout"}:
+        assert stages[:2] == ["ORDER_CREATED", "BUYER_APPROVED"]
     assert any("returned order ID" in line for line in output)
     assert [prompt.split(":", 1)[0] for prompt in prompts] == [
         "Returned PayPal order ID (not a URL or JWT)",
@@ -325,21 +337,53 @@ def test_run_demo_parameterized_outcomes_use_order_id_then_approve_and_no_callba
 
     if outcome == "success":
         assert return_code == 0
-        assert [item["status"] for item in json_outputs] == ["CREATED", "COMPLETED", "COMPLETED"]
-        assert all(item["payment_completed"] is True for item in json_outputs[1:])
-        assert all(item["capture_ids"] == ["SANDBOX-CAPTURE-1"] for item in json_outputs[1:])
-        assert sum(call[0] == "GET" for call in session.calls) == 3
+        assert [item["status"] for item in provider_outputs] == ["CREATED", "COMPLETED", "COMPLETED"]
+        assert all(item["payment_completed"] is True for item in provider_outputs[1:])
+        assert all(item["capture_ids"] == ["SANDBOX-CAPTURE-1"] for item in provider_outputs[1:])
+        assert sum(call[0] == "GET" for call in session.calls) == 4
         assert sum(call[0] == "POST" for call in session.calls) == 3
     else:
         assert return_code == 3
-        assert json_outputs[-1]["status"] == "UNKNOWN"
-        assert json_outputs[-1]["payment_completed"] is False
+        assert provider_outputs[-1]["status"] == "UNKNOWN"
+        assert provider_outputs[-1]["payment_completed"] is False
         assert sum(call[0] == "POST" for call in session.calls) == 3
         if outcome in {"UNKNOWN", "capture_timeout"}:
-            assert sum(call[0] == "GET" for call in session.calls) == 1
-        else:
             assert sum(call[0] == "GET" for call in session.calls) == 2
+        elif outcome == "success":
+            assert sum(call[0] == "GET" for call in session.calls) == 4
+        else:
+            assert sum(call[0] == "GET" for call in session.calls) == 3
         assert any("No retry was attempted" in line for line in output)
+
+
+def test_paypal_does_not_approve_buyer_before_capture(monkeypatch, tmp_path):
+    return_code, output, errors, session, _ = run_fake_demo(
+        monkeypatch, tmp_path, outcome="not_approved", inputs=["SANDBOX-ORDER-1", "APPROVE"],
+    )
+    assert return_code == 3
+    assert errors == []
+    assert any('"stage": "CREATED"' in line for line in output)
+    assert any("did not verify BUYER_APPROVED" in line for line in output)
+    assert not any(call[0] == "POST" and call[1].endswith("/capture") for call in session.calls)
+
+
+def test_risk_hold_stops_before_any_paypal_request(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "risk_scoring.SyntheticIsolationForestScorer.score",
+        lambda _self, _features: RiskAssessment("hold-test-model", "hold-test-data", 0.91, "HOLD"),
+    )
+    return_code, output, errors, session, prompts = run_fake_demo(
+        monkeypatch, tmp_path, outcome="success", inputs=[],
+    )
+    assert return_code == 0
+    assert errors == []
+    assert prompts == []
+    assert session.calls == []
+    first = json.loads(next(line for line in output if line.startswith("{")))
+    assert first["status"] == "HOLD"
+    assert first["risk_assessment"]["decision"] == "HOLD"
+    assert first["payment_completed"] is False
+    assert any("no PayPal order was created" in line for line in output)
 
 
 def test_manual_order_mismatch_stops_before_get_or_capture(monkeypatch, tmp_path):
@@ -458,3 +502,40 @@ def test_public_result_rejects_production_and_arbitrary_paypal_urls(approval_url
     assert demo._public_result(
         {"status": "CREATED", "provider_order_id": "SANDBOX-ORDER-1", "approval_url": approval_url}
     ) == {"status": "CREATED", "provider_order_id": "SANDBOX-ORDER-1"}
+
+
+def test_public_result_exposes_only_safe_risk_summary_fields():
+    secret_marker = "LOCAL-TEST-SECRET-MUST-NOT-LEAK"
+    public = demo._public_result({
+        "status": "CREATED",
+        "transaction_id": "local-transaction",
+        "access_token": secret_marker,
+        "provider_response": {"secret": secret_marker},
+        "risk_assessment": {
+            "decision": "ALLOW",
+            "anomaly_score": 0.2,
+            "model_version": "synthetic-v1",
+            "training_dataset_id": "synthetic-data-v1",
+            "scored_at": 123.0,
+            "explanation": {
+                "summary": "safe summary",
+                "reason_codes": ["ANOMALY_BELOW_THRESHOLD", 7],
+                "method": "rule annotations",
+                "token": secret_marker,
+            },
+            "raw_token": secret_marker,
+        },
+    })
+    assert public["risk_assessment"] == {
+        "decision": "ALLOW",
+        "anomaly_score": 0.2,
+        "model_version": "synthetic-v1",
+        "training_dataset_id": "synthetic-data-v1",
+        "scored_at": 123.0,
+        "explanation": {
+            "summary": "safe summary",
+            "reason_codes": ["ANOMALY_BELOW_THRESHOLD"],
+            "method": "rule annotations",
+        },
+    }
+    assert secret_marker not in json.dumps(public)
