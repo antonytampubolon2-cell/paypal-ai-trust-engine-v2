@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 ASGIApp = Callable[[dict[str, Any], Callable[..., Awaitable[dict[str, Any]]], Callable[..., Awaitable[None]]], Awaitable[None]]
+DEFAULT_MAX_RATE_LIMIT_STATE_ENTRIES = 10_000
 
 
 def _response(status: int, detail: str, *, headers: list[tuple[bytes, bytes]] | None = None):
@@ -33,36 +35,50 @@ class RequestGuardMiddleware:
         max_concurrent_requests: int = 16,
         rate_limit_requests: int = 120,
         rate_limit_window_seconds: int = 60,
+        max_rate_limit_state_entries: int = DEFAULT_MAX_RATE_LIMIT_STATE_ENTRIES,
         request_timeout_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ):
-        if max_body_bytes < 1 or max_concurrent_requests < 1 or rate_limit_requests < 1 or rate_limit_window_seconds < 1 or request_timeout_seconds <= 0:
+        if (max_body_bytes < 1 or max_concurrent_requests < 1 or rate_limit_requests < 1
+                or rate_limit_window_seconds < 1 or max_rate_limit_state_entries < 1
+                or request_timeout_seconds <= 0):
             raise ValueError("request guard limits must be positive")
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.rate_limit_requests = rate_limit_requests
         self.rate_limit_window_seconds = rate_limit_window_seconds
+        self.max_rate_limit_state_entries = max_rate_limit_state_entries
         self.request_timeout_seconds = request_timeout_seconds
         self.clock = clock
         self._slots = threading.BoundedSemaphore(max_concurrent_requests)
         self._rate_lock = threading.Lock()
         self._rate: dict[str, tuple[int, int]] = {}
+        self._last_cleanup_window: int | None = None
 
-    def _rate_allowed(self, peer: str) -> bool:
-        now = int(self.clock())
-        window = now // self.rate_limit_window_seconds
+    def _rate_allowed(self, peer: str) -> tuple[bool, str | None, int | None]:
+        now = self.clock()
+        window = int(now // self.rate_limit_window_seconds)
         with self._rate_lock:
-            # Bound memory even if an attacker can create many direct peer addresses.
-            if len(self._rate) > 10_000:
-                self._rate = {key: value for key, value in self._rate.items() if value[0] >= window - 1}
-            prior_window, count = self._rate.get(peer, (window, 0))
+            # Sweep once per fixed window. Only expired buckets are removed; active
+            # identities are never evicted to make room for a different peer.
+            if self._last_cleanup_window != window:
+                self._rate = {key: value for key, value in self._rate.items() if value[0] >= window}
+                self._last_cleanup_window = window
+            prior = self._rate.get(peer)
+            if prior is None and len(self._rate) >= self.max_rate_limit_state_entries:
+                retry_after = max(
+                    1,
+                    math.ceil((window + 1) * self.rate_limit_window_seconds - now),
+                )
+                return False, "capacity", retry_after
+            prior_window, count = prior if prior is not None else (window, 0)
             if prior_window != window:
                 count = 0
             if count >= self.rate_limit_requests:
                 self._rate[peer] = (window, count)
-                return False
+                return False, "limited", self.rate_limit_window_seconds
             self._rate[peer] = (window, count + 1)
-            return True
+            return True, None, None
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
@@ -77,8 +93,12 @@ class RequestGuardMiddleware:
             client = scope.get("client")
             # Deliberately do not use X-Forwarded-For or other caller-controlled headers.
             peer = str(client[0]) if isinstance(client, (tuple, list)) and client else "unknown-peer"
-            if not self._rate_allowed(peer):
-                await _response(429, "request rate limit exceeded", headers=[(b"retry-after", str(self.rate_limit_window_seconds).encode("ascii"))])(send)
+            rate_allowed, rate_rejection, retry_after = self._rate_allowed(peer)
+            if not rate_allowed:
+                if rate_rejection == "capacity":
+                    await _response(503, "rate limiter capacity exhausted", headers=[(b"retry-after", str(retry_after).encode("ascii"))])(send)
+                else:
+                    await _response(429, "request rate limit exceeded", headers=[(b"retry-after", str(retry_after).encode("ascii"))])(send)
                 return
 
             content_lengths = [value for name, value in scope.get("headers", []) if name.lower() == b"content-length"]
