@@ -33,6 +33,11 @@
     <input id="risk-json-file" type="file" accept="application/json,.json">
     <p id="risk-import-status" class="muted">No local demo report loaded. Imported files are displayed as unverified local evidence.</p>
     <div id="risk-assessment" class="muted">No valid risk assessment is available.</div>
+    <div id="provider-safety-summary" class="card" aria-live="polite">
+      <strong>Provider Safety</strong>
+      <div class="row">Provider invocations: UNAVAILABLE — NOT VERIFIED</div>
+      <div class="row">PayPal dispatch: UNAVAILABLE — NOT VERIFIED</div>
+    </div>
     <div id="scenario-report" class="muted">No offline scenario report loaded.</div>
   </section>
   <div class="grid" id="controls"></div>
@@ -105,6 +110,15 @@ function renderOfflineReport(data) {
   addText(target, 'Evidence source', 'Local file (not independently verified)');
   addText(target, 'Execution', 'SIMULATED — no PayPal transaction or payment');
   addText(target, 'Disclaimer', data.disclaimer);
+  const providerSafety = document.getElementById('provider-safety-summary');
+  providerSafety.textContent = '';
+  const invocationCount = Number.isSafeInteger(data.provider_invocation_count) && data.provider_invocation_count >= 0
+    ? String(data.provider_invocation_count) : 'UNAVAILABLE — NOT VERIFIED';
+  const dispatchStatus = typeof data.paypal_dispatch === 'string' && data.paypal_dispatch.trim().length > 0 && data.paypal_dispatch.length <= 100
+    ? data.paypal_dispatch : 'UNAVAILABLE — NOT VERIFIED';
+  addText(providerSafety, 'Provider Safety', 'Imported report summary');
+  addText(providerSafety, 'Provider invocations', invocationCount);
+  addText(providerSafety, 'PayPal dispatch', dispatchStatus);
   for (const item of data.scenarios) {
     const card = document.createElement('div');
     card.className = 'card';

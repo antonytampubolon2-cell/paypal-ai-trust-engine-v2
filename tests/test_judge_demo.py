@@ -44,3 +44,24 @@ def test_dashboard_import_displays_only_simulated_offline_rows():
     assert "scenario-report" in source
     assert "target.append(card)" in source
     assert "target.innerHTML" not in source
+
+
+def test_dashboard_provider_safety_summary_uses_imported_values_and_safe_fallbacks():
+    dashboard = Path(__file__).resolve().parents[1] / "dashboard_v2.html"
+    source = dashboard.read_text(encoding="utf-8")
+
+    assert 'id="provider-safety-summary"' in source
+    assert "data.provider_invocation_count" in source
+    assert "Number.isSafeInteger(data.provider_invocation_count)" in source
+    assert "String(data.provider_invocation_count)" in source
+    assert "data.paypal_dispatch" in source
+    assert "data.paypal_dispatch.trim().length > 0" in source
+    assert "UNAVAILABLE — NOT VERIFIED" in source
+    assert "addText(providerSafety, 'Provider invocations', invocationCount)" in source
+    assert "addText(providerSafety, 'PayPal dispatch', dispatchStatus)" in source
+    assert "DISABLED_NOT_CALLED" not in source
+    assert "function validOfflineReport(data)" in source
+    assert "data.scenarios.every" in source
+    assert "item.execution_label === 'SIMULATED'" in source
+    assert "item.payment_status === 'NOT_DISPATCHED'" in source
+    assert "target.innerHTML" not in source
