@@ -49,6 +49,26 @@ def ok_app(scope, receive, send):
     return respond()
 
 
+def test_duplicate_content_length_is_rejected_before_downstream_app():
+    called = []
+
+    async def downstream(scope, receive, send):
+        called.append(True)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    guard = RequestGuardMiddleware(downstream)
+    status, _, body = make_request(
+        guard,
+        "192.0.2.20",
+        headers=((b"content-length", b"0"), (b"content-length", b"0")),
+    )
+
+    assert status == 400
+    assert body["detail"] == "invalid content length"
+    assert called == []
+
+
 def test_high_cardinality_cannot_grow_rate_state_past_capacity():
     capacity = 24
     guard = RequestGuardMiddleware(

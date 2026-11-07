@@ -382,6 +382,14 @@ No image is published and no public endpoint or deployment is configured. Use HT
 - `tests/test_skyfire_api.py`: generated tokens, fake JWKS, claim/config/repeated-token tests, and direct ASGI calls.
 - `tests/test_skyfire_profiles.py`: separate generated-key fixtures and route/OpenAPI/claim-mixing tests for the published and November draft profiles; not provider integration evidence.
 - `tests/test_trustguard.py`: auth/ledger/provider tests and ML allow/HOLD/failure/durability/reproducibility regression tests.
+- `tests/test_api_security.py`: bounded rate-state, trusted peer, concurrency, and malformed request-header regression tests.
+
+## Readiness and design documents
+
+- [`docs/SYNTHETIC_MODEL_EVALUATION.md`](docs/SYNTHETIC_MODEL_EVALUATION.md): existing synthetic benchmark design, evidence, and limits; not real-world fraud validation.
+- [`docs/SECURITY_OPERATIONAL_READINESS.md`](docs/SECURITY_OPERATIONAL_READINESS.md): implemented/tested controls, coverage limits, deployment responsibilities, and action-risk tiers.
+- [`docs/SECURITY_EVENT_INTEGRATION_SPEC.md`](docs/SECURITY_EVENT_INTEGRATION_SPEC.md): proposed vendor-neutral event envelope and future delivery design; no SIEM/SOAR/EDR integration is active.
+- [`docs/PAYPAL_SANDBOX_READINESS.md`](docs/PAYPAL_SANDBOX_READINESS.md): presence-only Sandbox preflight and unresolved operator prerequisites; no order or capture was attempted.
 
 ## Protocol references
 
