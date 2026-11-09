@@ -745,7 +745,28 @@ def build_paypal_order_payload(tx: CanonicalTransaction) -> dict[str, Any]:
     merchant = tx.paypal_merchant_id or tx.payee
     if not merchant or (tx.skyfire_service_id is not None and not tx.paypal_merchant_id):
         raise SecurityError("PayPal payload requires a separate canonical merchant identity")
-    return {"intent": "CAPTURE", "purchase_units": [{"reference_id": tx.transaction_id, "payee": {"merchant_id": merchant}, "amount": {"currency_code": tx.currency, "value": f"{tx.amount_decimal:.2f}"}}]}
+    total = f"{tx.amount_decimal:.2f}"
+    # This prototype has no merchant product catalog. Represent its approved
+    # canonical amount as one explicit, server-generated line item; never accept
+    # payer-supplied item names, quantities, unit prices, or currency.
+    item = {
+        "name": "Authorized transaction",
+        "quantity": "1",
+        "unit_amount": {"currency_code": tx.currency, "value": total},
+    }
+    return {
+        "intent": "CAPTURE",
+        "purchase_units": [{
+            "reference_id": tx.transaction_id,
+            "payee": {"merchant_id": merchant},
+            "amount": {
+                "currency_code": tx.currency,
+                "value": total,
+                "breakdown": {"item_total": {"currency_code": tx.currency, "value": total}},
+            },
+            "items": [item],
+        }],
+    }
 
 
 class TrustGuard:

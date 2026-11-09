@@ -372,7 +372,16 @@ def test_duplicate_dispatch_after_created_is_not_repeated(tmp_path, config, sign
 def test_payload_is_exact_canonical_amount_currency_and_payee():
     payload = build_paypal_order_payload(tx(amount="50.25"))
     unit = payload["purchase_units"][0]
-    assert unit["amount"] == {"currency_code": "USD", "value": "50.25"}
+    assert unit["amount"] == {
+        "currency_code": "USD",
+        "value": "50.25",
+        "breakdown": {"item_total": {"currency_code": "USD", "value": "50.25"}},
+    }
+    assert unit["items"] == [{
+        "name": "Authorized transaction",
+        "quantity": "1",
+        "unit_amount": {"currency_code": "USD", "value": "50.25"},
+    }]
     assert unit["payee"] == {"merchant_id": "merchant-1"}
 
 

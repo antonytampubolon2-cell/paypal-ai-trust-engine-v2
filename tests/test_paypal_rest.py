@@ -27,6 +27,7 @@ from trustguard import (
 
 @pytest.fixture(autouse=True)
 def explicit_test_merchant_mapping(monkeypatch):
+    monkeypatch.setenv("PAYPAL_ENV", "sandbox")
     monkeypatch.setenv("TRUSTGUARD_PAYPAL_MERCHANT_ID", "merchant-1")
 
 
@@ -76,10 +77,21 @@ def tx(amount="50.00", currency="USD", payee="merchant-1", txn="local-txn-1", id
 
 
 def unit_for(transaction, *, amount=None, currency=None, payee=None, captures=None):
+    total = amount or f"{transaction.amount_decimal:.2f}"
+    item_currency = currency or transaction.currency
     unit = {
         "reference_id": transaction.transaction_id,
         "payee": {"merchant_id": payee or transaction.payee},
-        "amount": {"currency_code": currency or transaction.currency, "value": amount or f"{transaction.amount_decimal:.2f}"},
+        "amount": {
+            "currency_code": item_currency,
+            "value": total,
+            "breakdown": {"item_total": {"currency_code": item_currency, "value": total}},
+        },
+        "items": [{
+            "name": "Authorized transaction",
+            "quantity": "1",
+            "unit_amount": {"currency_code": item_currency, "value": total},
+        }],
     }
     if captures is not None:
         unit["payments"] = {"captures": captures}
@@ -110,12 +122,30 @@ def test_sandbox_provider_fails_closed_without_flag_or_credentials(monkeypatch):
 
 def test_from_env_loads_credentials_but_runtime_flag_still_blocks_requests(monkeypatch):
     session = FakeSession()
+    monkeypatch.setenv("PAYPAL_ENV", "sandbox")
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
     api = PayPalRestOrdersProvider.from_env(config(), session=session)
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "false")
     with pytest.raises(ConfigurationError):
+        api.create_order(tx())
+    assert session.calls == []
+
+
+def test_provider_requires_and_rechecks_explicit_sandbox_environment(monkeypatch):
+    monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.delenv("PAYPAL_ENV", raising=False)
+    with pytest.raises(ConfigurationError, match="PAYPAL_ENV"):
+        PayPalRestOrdersProvider(config(), session=FakeSession())
+
+    monkeypatch.setenv("PAYPAL_ENV", "sandbox")
+    session = FakeSession()
+    api = PayPalRestOrdersProvider(config(), session=session)
+    monkeypatch.setenv("PAYPAL_ENV", "production")
+    with pytest.raises(ConfigurationError, match="PAYPAL_ENV"):
         api.create_order(tx())
     assert session.calls == []
 
@@ -158,7 +188,20 @@ def test_oauth_uses_client_credentials_and_creates_bound_order_with_idempotency(
     assert create[2]["headers"]["PayPal-Request-Id"] == transaction.idempotency_key
     assert create[2]["json"] == {
         "intent": "CAPTURE",
-        "purchase_units": [{"reference_id": transaction.transaction_id, "payee": {"merchant_id": transaction.payee}, "amount": {"currency_code": transaction.currency, "value": "50.00"}}],
+        "purchase_units": [{
+            "reference_id": transaction.transaction_id,
+            "payee": {"merchant_id": transaction.payee},
+            "amount": {
+                "currency_code": transaction.currency,
+                "value": "50.00",
+                "breakdown": {"item_total": {"currency_code": transaction.currency, "value": "50.00"}},
+            },
+            "items": [{
+                "name": "Authorized transaction",
+                "quantity": "1",
+                "unit_amount": {"currency_code": transaction.currency, "value": "50.00"},
+            }],
+        }],
     }
     assert result["status"] != "COMPLETED"
 
@@ -179,6 +222,26 @@ def test_repeated_create_uses_same_paypal_request_id_and_oauth_cache(monkeypatch
     assert sum(c[1] == SANDBOX_BASE_URL + TOKEN_PATH for c in session.calls) == 1
 
 
+def test_oauth_token_refreshes_before_expiry(monkeypatch):
+    transaction = tx()
+    now = [1_000.0]
+    monkeypatch.setattr("paypal_rest.time.time", lambda: now[0])
+    session = FakeSession(post=[
+        FakeResponse(200, {"access_token": "first-token", "expires_in": 60}),
+        FakeResponse(201, order(transaction, "CREATED")),
+        FakeResponse(200, {"access_token": "second-token", "expires_in": 3600}),
+        FakeResponse(201, order(transaction, "CREATED")),
+    ])
+    api = provider(monkeypatch, session)
+    api.create_order(transaction)
+    now[0] = 1_031.0
+    api.create_order(transaction)
+    token_calls = [call for call in session.calls if call[1] == SANDBOX_BASE_URL + TOKEN_PATH]
+    order_calls = [call for call in session.calls if call[1] == SANDBOX_BASE_URL + ORDERS_PATH]
+    assert len(token_calls) == 2
+    assert len(order_calls) == 2
+
+
 def test_order_timeout_is_ambiguous_and_not_retried(monkeypatch):
     session = FakeSession(post=[FakeResponse(200, {"access_token": "token", "expires_in": 3600}), requests.Timeout("timed out")])
     api = provider(monkeypatch, session)
@@ -186,6 +249,22 @@ def test_order_timeout_is_ambiguous_and_not_retried(monkeypatch):
         api.create_order(tx())
     assert len(session.calls) == 2
     assert session.calls[1][1] == SANDBOX_BASE_URL + ORDERS_PATH
+
+
+@pytest.mark.parametrize("status_code,exception", [
+    (422, ProviderDefinitiveError),
+    (503, ProviderAmbiguousError),
+])
+def test_order_http_errors_are_not_retried(monkeypatch, status_code, exception):
+    session = FakeSession(post=[
+        FakeResponse(200, {"access_token": "token", "expires_in": 3600}),
+        FakeResponse(status_code, {"name": "provider-error"}),
+    ])
+    api = provider(monkeypatch, session)
+    with pytest.raises(exception):
+        api.create_order(tx())
+    assert len(session.calls) == 2
+    assert session.calls[-1][1] == SANDBOX_BASE_URL + ORDERS_PATH
 
 
 def test_order_idempotency_conflict_is_ambiguous(monkeypatch):
@@ -220,6 +299,28 @@ def test_order_response_amount_currency_and_payee_mismatch_is_ambiguous(monkeypa
     session = FakeSession(post=[
         FakeResponse(200, {"access_token": "token", "expires_in": 3600}),
         FakeResponse(201, order(transaction, unit=unit(transaction))),
+    ])
+    api = provider(monkeypatch, session)
+    with pytest.raises(ProviderAmbiguousError) as err:
+        api.create_order(transaction)
+    assert err.value.provider_order_id == "PAYPAL-ORDER-1"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda unit: unit.update(reference_id="different-transaction"),
+    lambda unit: unit.update(items=[]),
+    lambda unit: unit["items"][0].update(name="Different item"),
+    lambda unit: unit["items"][0].update(quantity="2"),
+    lambda unit: unit["items"][0]["unit_amount"].update(value="25.00"),
+    lambda unit: unit["amount"]["breakdown"]["item_total"].update(value="49.99"),
+])
+def test_order_response_item_mismatch_is_ambiguous(monkeypatch, mutate):
+    transaction = tx()
+    unit = unit_for(transaction)
+    mutate(unit)
+    session = FakeSession(post=[
+        FakeResponse(200, {"access_token": "token", "expires_in": 3600}),
+        FakeResponse(201, order(transaction, unit=unit)),
     ])
     api = provider(monkeypatch, session)
     with pytest.raises(ProviderAmbiguousError) as err:

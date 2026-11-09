@@ -31,6 +31,7 @@ def valid_environment(tmp_path):
     return {
         "TRUSTGUARD_LOCAL_SANDBOX_DEMO": "true",
         "TRUSTGUARD_ENABLE_PAYPAL_SANDBOX": "true",
+        "PAYPAL_ENV": "sandbox",
         "PAYPAL_CLIENT_ID": "fake-client-id-for-local-test",
         "PAYPAL_CLIENT_SECRET": "fake-secret-for-local-test",
         "TRUSTGUARD_LOCAL_TEST_SERVICE_ID": LOCAL_DEMO_SERVICE_ID,
@@ -203,8 +204,17 @@ class DemoFakeSession:
             self.create_payload = kwargs["json"]
             unit = self.create_payload["purchase_units"][0]
             assert unit["reference_id"]
-            assert unit["amount"] == {"currency_code": "USD", "value": "5.00"}
+            assert unit["amount"] == {
+                "currency_code": "USD",
+                "value": "5.00",
+                "breakdown": {"item_total": {"currency_code": "USD", "value": "5.00"}},
+            }
             assert unit["payee"] == {"merchant_id": self.merchant_id}
+            assert unit["items"] == [{
+                "name": "Authorized transaction",
+                "quantity": "1",
+                "unit_amount": {"currency_code": "USD", "value": "5.00"},
+            }]
             self.order_id = "SANDBOX-ORDER-1"
             return DemoFakeResponse(
                 201,
@@ -407,6 +417,7 @@ def test_manual_order_mismatch_stops_before_get_or_capture(monkeypatch, tmp_path
 
 
 def test_production_paypal_mapping_rejects_synthetic_official_service_without_local_env(monkeypatch):
+    monkeypatch.setenv("PAYPAL_ENV", "sandbox")
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "fake-client-id")
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "fake-client-secret")

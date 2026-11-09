@@ -34,6 +34,8 @@ class PayPalRestOrdersProvider:
     def __init__(self, trust_config: TrustConfig,
                  *, session: Any | None = None, timeout: tuple[float, float] = (3.05, 15.0),
                  return_url: str | None = None, cancel_url: str | None = None):
+        if os.environ.get("PAYPAL_ENV", "").strip().lower() != "sandbox":
+            raise ConfigurationError("PAYPAL_ENV must be explicitly set to sandbox")
         if os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() != "true":
             raise ConfigurationError("PayPal Sandbox dispatch requires TRUSTGUARD_ENABLE_PAYPAL_SANDBOX=true")
         client_id = os.environ.get("PAYPAL_CLIENT_ID", "")
@@ -71,6 +73,8 @@ class PayPalRestOrdersProvider:
 
     @staticmethod
     def _ensure_enabled() -> None:
+        if os.environ.get("PAYPAL_ENV", "").strip().lower() != "sandbox":
+            raise ConfigurationError("PayPal requests require PAYPAL_ENV=sandbox")
         if os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() != "true":
             raise ConfigurationError("PayPal Sandbox dispatch is disabled")
 
@@ -155,7 +159,34 @@ class PayPalRestOrdersProvider:
             returned_amount = Decimal(str(amount.get("value")))
         except (InvalidOperation, ValueError):
             return False
-        return returned_amount.is_finite() and returned_amount == tx.amount_decimal
+        if not returned_amount.is_finite() or returned_amount != tx.amount_decimal:
+            return False
+
+        # Bind the item list to the same canonical transaction authorized by
+        # TrustGuard. This prototype has one fixed server-generated item and
+        # does not accept payer-supplied names, quantities, prices, or currency.
+        expected_total = f"{tx.amount_decimal:.2f}"
+        items = unit.get("items")
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            return False
+        item = items[0]
+        unit_amount = item.get("unit_amount")
+        if (item.get("name") != "Authorized transaction" or item.get("quantity") != "1"
+                or not isinstance(unit_amount, dict)
+                or unit_amount.get("currency_code") != tx.currency):
+            return False
+        try:
+            item_amount = Decimal(str(unit_amount.get("value")))
+        except (InvalidOperation, ValueError):
+            return False
+        if not item_amount.is_finite() or item_amount != tx.amount_decimal:
+            return False
+        breakdown = amount.get("breakdown")
+        item_total = breakdown.get("item_total") if isinstance(breakdown, dict) else None
+        if (not isinstance(item_total, dict) or item_total.get("currency_code") != tx.currency
+                or item_total.get("value") != expected_total):
+            return False
+        return True
 
     @staticmethod
     def _approval_url(body: Mapping[str, Any], order_id: str) -> str | None:

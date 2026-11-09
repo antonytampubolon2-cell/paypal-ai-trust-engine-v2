@@ -39,6 +39,7 @@ DISCLAIMER = (
 REQUIRED_ENV = (
     "TRUSTGUARD_LOCAL_SANDBOX_DEMO",
     "TRUSTGUARD_ENABLE_PAYPAL_SANDBOX",
+    "PAYPAL_ENV",
     "PAYPAL_CLIENT_ID",
     "PAYPAL_CLIENT_SECRET",
     "TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID",
@@ -146,6 +147,8 @@ def validate_config(env: Mapping[str, str] | None = None) -> SandboxDemoConfig:
         raise ValueError("TRUSTGUARD_LOCAL_SANDBOX_DEMO must be exactly true")
     if values["TRUSTGUARD_ENABLE_PAYPAL_SANDBOX"].strip().lower() != "true":
         raise ValueError("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX must be exactly true")
+    if values["PAYPAL_ENV"].strip().lower() != "sandbox":
+        raise ValueError("PAYPAL_ENV must be exactly sandbox")
 
     local_service_id = values.get("TRUSTGUARD_LOCAL_TEST_SERVICE_ID", "").strip()
     if local_service_id:

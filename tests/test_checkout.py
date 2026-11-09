@@ -104,6 +104,7 @@ def trust_config(signing_key):
 
 
 def set_paypal_env(monkeypatch, *, mapped_service=SERVICE):
+    monkeypatch.setenv("PAYPAL_ENV", "sandbox")
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "synthetic-client-id")
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "synthetic-client-secret")
@@ -125,13 +126,21 @@ def transaction(*, transaction_id="tx-low5", idempotency_key="create-request-1",
 
 
 def order_unit(tx, *, amount=None, currency=None, merchant=None, captures=None):
+    total = amount or f"{tx.amount_decimal:.2f}"
+    item_currency = currency or tx.currency
     unit = {
         "reference_id": tx.transaction_id,
         "payee": {"merchant_id": merchant or MERCHANT},
         "amount": {
-            "currency_code": currency or tx.currency,
-            "value": amount or f"{tx.amount_decimal:.2f}",
+            "currency_code": item_currency,
+            "value": total,
+            "breakdown": {"item_total": {"currency_code": item_currency, "value": total}},
         },
+        "items": [{
+            "name": "Authorized transaction",
+            "quantity": "1",
+            "unit_amount": {"currency_code": item_currency, "value": total},
+        }],
     }
     if captures is not None:
         unit["payments"] = {"captures": captures}
@@ -248,7 +257,16 @@ def test_sandbox_contract_uses_distinct_canonical_merchant_and_skyfire_mapping(m
             {
                 "reference_id": tx.transaction_id,
                 "payee": {"merchant_id": MERCHANT},
-                "amount": {"currency_code": "USD", "value": "5.00"},
+                "amount": {
+                    "currency_code": "USD",
+                    "value": "5.00",
+                    "breakdown": {"item_total": {"currency_code": "USD", "value": "5.00"}},
+                },
+                "items": [{
+                    "name": "Authorized transaction",
+                    "quantity": "1",
+                    "unit_amount": {"currency_code": "USD", "value": "5.00"},
+                }],
             }
         ],
     }
@@ -261,6 +279,7 @@ def test_skyfire_mapping_is_explicit_and_missing_or_inconsistent_mapping_blocks_
     config, _, _ = auth_material()
     tx = transaction()
     for mapped_service, seller_service in ((None, SERVICE), ("wrong-service", SERVICE), (SERVICE, "other-service")):
+        monkeypatch.setenv("PAYPAL_ENV", "sandbox")
         monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
         monkeypatch.setenv("PAYPAL_CLIENT_ID", "synthetic-client-id")
         monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "synthetic-client-secret")
