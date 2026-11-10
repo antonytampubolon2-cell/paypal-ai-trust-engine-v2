@@ -7,6 +7,7 @@ import requests
 import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 
+import paypal_rest
 from paypal_rest import (
     ORDERS_PATH,
     SANDBOX_BASE_URL,
@@ -102,22 +103,28 @@ def order(transaction, status="CREATED", *, order_id="PAYPAL-ORDER-1", unit=None
     return {"id": order_id, "status": status, "purchase_units": [unit or unit_for(transaction)]}
 
 
+def install_test_transport(monkeypatch, session):
+    """Install a deterministic transport only through this test module's patch scope."""
+    monkeypatch.setattr(paypal_rest, "_new_sandbox_session", lambda: session)
+
+
 def provider(monkeypatch, session, **kwargs):
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
-    return PayPalRestOrdersProvider(config(), session=session, **kwargs)
+    install_test_transport(monkeypatch, session)
+    return PayPalRestOrdersProvider(config(), **kwargs)
 
 
 def test_sandbox_provider_fails_closed_without_flag_or_credentials(monkeypatch):
     monkeypatch.delenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", raising=False)
     with pytest.raises(ConfigurationError):
-        PayPalRestOrdersProvider.from_env(config(), session=FakeSession())
+        PayPalRestOrdersProvider.from_env(config())
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
     monkeypatch.delenv("PAYPAL_CLIENT_ID", raising=False)
     monkeypatch.delenv("PAYPAL_CLIENT_SECRET", raising=False)
     with pytest.raises(ConfigurationError):
-        PayPalRestOrdersProvider.from_env(config(), session=FakeSession())
+        PayPalRestOrdersProvider.from_env(config())
 
 
 def test_from_env_loads_credentials_but_runtime_flag_still_blocks_requests(monkeypatch):
@@ -126,7 +133,8 @@ def test_from_env_loads_credentials_but_runtime_flag_still_blocks_requests(monke
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
-    api = PayPalRestOrdersProvider.from_env(config(), session=session)
+    install_test_transport(monkeypatch, session)
+    api = PayPalRestOrdersProvider.from_env(config())
     monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "false")
     with pytest.raises(ConfigurationError):
         api.create_order(tx())
@@ -139,11 +147,12 @@ def test_provider_requires_and_rechecks_explicit_sandbox_environment(monkeypatch
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
     monkeypatch.delenv("PAYPAL_ENV", raising=False)
     with pytest.raises(ConfigurationError, match="PAYPAL_ENV"):
-        PayPalRestOrdersProvider(config(), session=FakeSession())
+        PayPalRestOrdersProvider(config())
 
     monkeypatch.setenv("PAYPAL_ENV", "sandbox")
     session = FakeSession()
-    api = PayPalRestOrdersProvider(config(), session=session)
+    install_test_transport(monkeypatch, session)
+    api = PayPalRestOrdersProvider(config())
     monkeypatch.setenv("PAYPAL_ENV", "production")
     with pytest.raises(ConfigurationError, match="PAYPAL_ENV"):
         api.create_order(tx())
@@ -156,7 +165,81 @@ def test_incomplete_trust_config_blocks_provider_initialization(monkeypatch):
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
     incomplete = TrustConfig("", "", {}, (), "", "", "", "")
     with pytest.raises(ConfigurationError):
-        PayPalRestOrdersProvider(incomplete, session=FakeSession())
+        PayPalRestOrdersProvider(incomplete)
+
+
+def test_production_provider_does_not_accept_injected_session(monkeypatch):
+    monkeypatch.setenv("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "true")
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
+    insecure = requests.Session()
+    insecure.verify = False
+    try:
+        with pytest.raises(TypeError, match="unexpected keyword argument 'session'"):
+            PayPalRestOrdersProvider(config(), session=insecure)
+    finally:
+        insecure.close()
+
+
+def test_production_session_enables_tls_verification_and_ignores_untrusted_env_transport():
+    session = paypal_rest._new_sandbox_session()
+    try:
+        assert isinstance(session, requests.Session)
+        assert session.verify is True
+        assert session.trust_env is False
+        assert type(session.get_adapter(SANDBOX_BASE_URL)) is requests.adapters.HTTPAdapter
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://api-m.sandbox.paypal.com",
+    "https://api-m.paypal.com",
+    "https://api-m.sandbox.paypal.com.evil.invalid",
+    "https://api-m.sandbox.paypal.com/unexpected-prefix",
+])
+def test_insecure_or_non_sandbox_endpoint_is_rejected_before_transport(monkeypatch, base_url):
+    session = FakeSession()
+    api = provider(monkeypatch, session)
+    monkeypatch.setattr(paypal_rest, "SANDBOX_BASE_URL", base_url)
+    with pytest.raises(ConfigurationError, match="verified Sandbox HTTPS origin"):
+        api.create_order(tx())
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("bad_value", [
+    float("nan"), float("inf"), float("-inf"), 0, -1, 1e300, True, False,
+])
+@pytest.mark.parametrize("component", [0, 1])
+def test_timeout_rejects_nonfinite_nonpositive_bool_and_over_limit_values(monkeypatch, bad_value, component):
+    timeout = [3.05, 15.0]
+    timeout[component] = bad_value
+    session = FakeSession()
+    with pytest.raises(ConfigurationError, match="timeouts"):
+        provider(monkeypatch, session, timeout=tuple(timeout))
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("bad_timeout", [(1,), (1, 2, 3), "5", [], [1, 2]])
+def test_timeout_rejects_unsupported_formats(monkeypatch, bad_timeout):
+    session = FakeSession()
+    with pytest.raises(ConfigurationError, match="timeout"):
+        provider(monkeypatch, session, timeout=bad_timeout)
+    assert session.calls == []
+
+
+def test_timeout_accepts_finite_scalar_and_bounded_connect_read_tuple(monkeypatch):
+    scalar = provider(monkeypatch, FakeSession(), timeout=2.5)
+    pair = provider(monkeypatch, FakeSession(), timeout=(0.1, 60.0))
+    assert scalar._timeout == 2.5
+    assert pair._timeout == (0.1, 60.0)
+
+
+def test_timeout_rejects_just_over_sixty_seconds(monkeypatch):
+    session = FakeSession()
+    with pytest.raises(ConfigurationError, match="timeout"):
+        provider(monkeypatch, session, timeout=60.0001)
+    assert session.calls == []
 
 
 def test_oauth_failure_stops_before_order_request(monkeypatch):
@@ -421,7 +504,8 @@ def test_trustguard_sandbox_create_and_reconcile_full_flow(monkeypatch, tmp_path
         get=[FakeResponse(200, completed)],
     )
     access_key, proof_key, jwk, trust = auth_material()
-    api = PayPalRestOrdersProvider(trust, session=session)
+    install_test_transport(monkeypatch, session)
+    api = PayPalRestOrdersProvider(trust)
     ledger = Ledger(tmp_path / "provider-flow.sqlite")
     guard = TrustGuard(trust, ledger, api)
     token, proof = token_and_proof(access_key, proof_key, jwk)
@@ -442,7 +526,8 @@ def test_trustguard_oauth_failure_is_failed_without_order_request(monkeypatch, t
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
     session = FakeSession(post=[FakeResponse(401, {"error": "invalid_client"})])
     access_key, proof_key, jwk, trust = auth_material()
-    api = PayPalRestOrdersProvider(trust, session=session)
+    install_test_transport(monkeypatch, session)
+    api = PayPalRestOrdersProvider(trust)
     ledger = Ledger(tmp_path / "oauth-failure.sqlite")
     guard = TrustGuard(trust, ledger, api)
     token, proof = token_and_proof(access_key, proof_key, jwk)
@@ -459,7 +544,8 @@ def test_trustguard_order_timeout_persists_unknown_and_never_retries(monkeypatch
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "test-client-secret")
     session = FakeSession(post=[FakeResponse(200, {"access_token": "opaque-token", "expires_in": 3600}), requests.Timeout("ambiguous")])
     access_key, proof_key, jwk, trust = auth_material()
-    api = PayPalRestOrdersProvider(trust, session=session)
+    install_test_transport(monkeypatch, session)
+    api = PayPalRestOrdersProvider(trust)
     ledger = Ledger(tmp_path / "timeout.sqlite")
     guard = TrustGuard(trust, ledger, api)
     token, proof = token_and_proof(access_key, proof_key, jwk, suffix="1")

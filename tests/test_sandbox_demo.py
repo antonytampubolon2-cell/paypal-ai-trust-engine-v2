@@ -7,6 +7,7 @@ import pytest
 import requests
 from cryptography.hazmat.primitives.asymmetric import ec
 
+import paypal_rest
 from paypal_rest import PayPalRestOrdersProvider
 from scripts import run_paypal_sandbox_demo as demo
 from skyfire_auth import (
@@ -188,10 +189,10 @@ class DemoFakeSession:
         self.create_payload = None
         self.order_id = None
         self.get_statuses = {
-            "success": ["APPROVED", "APPROVED", "COMPLETED", "COMPLETED"],
-            "mismatch": ["APPROVED", "APPROVED", "COMPLETED"],
-            "UNKNOWN": ["APPROVED", "APPROVED"],
-            "capture_timeout": ["APPROVED", "APPROVED"],
+            "success": ["APPROVED", "APPROVED", "APPROVED", "COMPLETED", "COMPLETED"],
+            "mismatch": ["APPROVED", "APPROVED", "APPROVED", "COMPLETED"],
+            "UNKNOWN": ["APPROVED", "APPROVED", "APPROVED"],
+            "capture_timeout": ["APPROVED", "APPROVED", "APPROVED"],
             "manual_mismatch": [],
             "not_approved": ["CREATED"],
         }[outcome].copy()
@@ -351,7 +352,7 @@ def test_run_demo_parameterized_outcomes_use_order_id_then_approve_and_no_callba
         assert [item["status"] for item in provider_outputs] == ["CREATED", "COMPLETED", "COMPLETED"]
         assert all(item["payment_completed"] is True for item in provider_outputs[1:])
         assert all(item["capture_ids"] == ["SANDBOX-CAPTURE-1"] for item in provider_outputs[1:])
-        assert sum(call[0] == "GET" for call in session.calls) == 4
+        assert sum(call[0] == "GET" for call in session.calls) == 5
         assert sum(call[0] == "POST" for call in session.calls) == 3
     else:
         assert return_code == 3
@@ -359,11 +360,11 @@ def test_run_demo_parameterized_outcomes_use_order_id_then_approve_and_no_callba
         assert provider_outputs[-1]["payment_completed"] is False
         assert sum(call[0] == "POST" for call in session.calls) == 3
         if outcome in {"UNKNOWN", "capture_timeout"}:
-            assert sum(call[0] == "GET" for call in session.calls) == 2
-        elif outcome == "success":
-            assert sum(call[0] == "GET" for call in session.calls) == 4
-        else:
             assert sum(call[0] == "GET" for call in session.calls) == 3
+        elif outcome == "success":
+            assert sum(call[0] == "GET" for call in session.calls) == 5
+        else:
+            assert sum(call[0] == "GET" for call in session.calls) == 4
         assert any("No retry was attempted" in line for line in output)
 
 
@@ -447,7 +448,8 @@ def test_production_paypal_mapping_rejects_synthetic_official_service_without_lo
         paypal_merchant_id=PAYPAL_MERCHANT_ID,
     )
     session = DemoFakeSession(PAYPAL_MERCHANT_ID, "manual_mismatch")
-    provider = PayPalRestOrdersProvider(trust_config, session=session)
+    monkeypatch.setattr(paypal_rest, "_new_sandbox_session", lambda: session)
+    provider = PayPalRestOrdersProvider(trust_config)
 
     with pytest.raises(ConfigurationError, match="synthetic service identity"):
         provider.create_order(transaction)

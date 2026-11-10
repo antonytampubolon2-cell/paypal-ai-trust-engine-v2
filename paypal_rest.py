@@ -1,6 +1,7 @@
-"""PayPal REST Orders v2 adapter. Sandbox endpoint only; HTTP session is injectable for tests."""
+"""PayPal REST Orders v2 adapter. Sandbox-only HTTPS transport."""
 from __future__ import annotations
 
+import math
 import os
 import time
 from decimal import Decimal, InvalidOperation
@@ -12,6 +13,7 @@ import requests
 from trustguard import (
     CanonicalTransaction,
     ConfigurationError,
+    Ledger,
     ProviderAmbiguousError,
     ProviderDefinitiveError,
     TrustConfig,
@@ -20,8 +22,38 @@ from trustguard import (
 
 
 SANDBOX_BASE_URL = "https://api-m.sandbox.paypal.com"
+SANDBOX_HOST = "api-m.sandbox.paypal.com"
 TOKEN_PATH = "/v1/oauth2/token"
 ORDERS_PATH = "/v2/checkout/orders"
+MAX_TIMEOUT_SECONDS = 60.0
+
+
+def _new_sandbox_session() -> requests.Session:
+    """Create the production transport with verified TLS and no env proxy overrides."""
+    session = requests.Session()
+    session.verify = True
+    session.trust_env = False
+    return session
+
+
+def _validated_timeout(value: Any) -> float | tuple[float, float]:
+    """Accept Requests scalar or connect/read timeouts, bounded to (0, 60] seconds."""
+    def component(item: Any) -> float:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ConfigurationError("timeouts must be finite positive numbers no greater than 60 seconds")
+        try:
+            seconds = float(item)
+        except (OverflowError, ValueError):
+            raise ConfigurationError("timeouts must be finite positive numbers no greater than 60 seconds") from None
+        if not math.isfinite(seconds) or not 0.0 < seconds <= MAX_TIMEOUT_SECONDS:
+            raise ConfigurationError("timeouts must be finite positive numbers no greater than 60 seconds")
+        return seconds
+
+    if isinstance(value, tuple):
+        if len(value) != 2:
+            raise ConfigurationError("tuple timeout must contain connect and read values")
+        return component(value[0]), component(value[1])
+    return component(value)
 
 
 class PayPalRestOrdersProvider:
@@ -32,7 +64,7 @@ class PayPalRestOrdersProvider:
     """
 
     def __init__(self, trust_config: TrustConfig,
-                 *, session: Any | None = None, timeout: tuple[float, float] = (3.05, 15.0),
+                 *, timeout: float | tuple[float, float] = (3.05, 15.0),
                  return_url: str | None = None, cancel_url: str | None = None):
         if os.environ.get("PAYPAL_ENV", "").strip().lower() != "sandbox":
             raise ConfigurationError("PAYPAL_ENV must be explicitly set to sandbox")
@@ -52,11 +84,10 @@ class PayPalRestOrdersProvider:
                     or local_issuer.path or local_issuer.query or local_issuer.fragment
                     or trust_config.audience != "trustguard-local-paypal-sandbox-demo"):
                 raise ConfigurationError("synthetic Sandbox identity requires isolated loopback demo authorization")
-        if not isinstance(timeout, tuple) or len(timeout) != 2 or any(not isinstance(x, (int, float)) or x <= 0 for x in timeout):
-            raise ConfigurationError("positive connect/read timeouts are required")
+        timeout = _validated_timeout(timeout)
         self._client_id = client_id
         self._client_secret = client_secret
-        self._session = session or requests.Session()
+        self._session = _new_sandbox_session()
         self._timeout = timeout
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
@@ -99,15 +130,31 @@ class PayPalRestOrdersProvider:
                 raise ConfigurationError("Skyfire service to PayPal merchant mapping is missing or inconsistent")
 
     @classmethod
-    def from_env(cls, trust_config: TrustConfig, *, session: Any | None = None,
-                 timeout: tuple[float, float] = (3.05, 15.0)) -> "PayPalRestOrdersProvider":
+    def from_env(cls, trust_config: TrustConfig, *,
+                 timeout: float | tuple[float, float] = (3.05, 15.0)) -> "PayPalRestOrdersProvider":
         if os.environ.get("TRUSTGUARD_ENABLE_PAYPAL_SANDBOX", "").lower() != "true":
             raise ConfigurationError("PayPal Sandbox dispatch is disabled")
         client_id = os.environ.get("PAYPAL_CLIENT_ID", "")
         client_secret = os.environ.get("PAYPAL_CLIENT_SECRET", "")
         if not client_id or not client_secret:
             raise ConfigurationError("PayPal Sandbox credentials are missing")
-        return cls(trust_config, session=session, timeout=timeout)
+        return cls(trust_config, timeout=timeout)
+
+    @staticmethod
+    def _provider_url(path: str) -> str:
+        if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "?" in path or "#" in path:
+            raise ConfigurationError("PayPal provider path is invalid")
+        url = SANDBOX_BASE_URL.rstrip("/") + path
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError:
+            raise ConfigurationError("PayPal endpoint must be the verified Sandbox HTTPS origin") from None
+        if (parsed.scheme != "https" or parsed.hostname != SANDBOX_HOST or port not in (None, 443)
+                or parsed.path != path
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise ConfigurationError("PayPal endpoint must be the verified Sandbox HTTPS origin")
+        return url
 
     def _oauth_token(self) -> str:
         self._ensure_enabled()
@@ -116,7 +163,7 @@ class PayPalRestOrdersProvider:
             return self._access_token
         try:
             response = self._session.post(
-                SANDBOX_BASE_URL + TOKEN_PATH,
+                self._provider_url(TOKEN_PATH),
                 auth=(self._client_id, self._client_secret),
                 data={"grant_type": "client_credentials"},
                 headers={"Accept": "application/json"},
@@ -219,7 +266,7 @@ class PayPalRestOrdersProvider:
         token = self._oauth_token()
         try:
             response = self._session.post(
-                SANDBOX_BASE_URL + ORDERS_PATH,
+                self._provider_url(ORDERS_PATH),
                 json=payload,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -295,7 +342,7 @@ class PayPalRestOrdersProvider:
         token = self._oauth_token()
         try:
             response = self._session.get(
-                SANDBOX_BASE_URL + ORDERS_PATH + "/" + quote(order_id, safe=""),
+                self._provider_url(ORDERS_PATH + "/" + quote(order_id, safe="")),
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
                 timeout=self._timeout,
                 allow_redirects=False,
@@ -328,22 +375,41 @@ class PayPalRestOrdersProvider:
                 return {"id": order_id, "status": "FAILED"}
         return {"id": order_id, "status": "UNKNOWN"}
 
-    def capture_order(self, tx: CanonicalTransaction, order_id: str, request_id: str) -> Mapping[str, Any]:
-        """Caller must durably mark capture started and verify approval first.
+    def capture_order(
+        self,
+        tx: CanonicalTransaction,
+        order_id: str,
+        request_id: str,
+        *,
+        ledger: Ledger,
+    ) -> Mapping[str, Any]:
+        """Consume a durable TrustGuard reservation and verify approval before POST.
 
-        POST completion alone is not enough: a separately authenticated GET must
-        confirm exact merchant, transaction, currency, total and completed captures.
-        This method never retries POST, even with the same idempotency key.
+        The provider GET independently binds the exact order to the canonical
+        transaction and must report APPROVED immediately before capture. A verified
+        COMPLETED GET is returned without another POST. This method never retries.
         """
         if (not isinstance(tx, CanonicalTransaction) or not (tx.paypal_merchant_id or tx.payee)
                 or not isinstance(order_id, str) or not order_id
-                or not isinstance(request_id, str) or not request_id):
-            raise ProviderDefinitiveError("canonical order and stable capture request identity are required")
+                or not isinstance(request_id, str) or not request_id
+                or not isinstance(ledger, Ledger)):
+            raise ProviderDefinitiveError("canonical transaction, stable order identity, and durable capture ledger are required")
         self._check_transaction_mapping(tx)
+        if not ledger.claim_capture_dispatch(tx, order_id, request_id):
+            raise ProviderDefinitiveError("a matching unused durable TrustGuard capture reservation is required")
+        preflight = dict(self.get_order_details(tx, order_id))
+        if preflight.get("id") != order_id:
+            raise ProviderAmbiguousError("PayPal approval preflight did not confirm the expected order", order_id)
+        if preflight.get("status") == "COMPLETED" and preflight.get("verified_capture") is True:
+            return preflight
+        if preflight.get("status") != "APPROVED":
+            raise ProviderAmbiguousError("PayPal order is not freshly verified as APPROVED; capture was not sent", order_id)
+        if not ledger.capture_dispatch_claim_valid(tx, order_id, request_id):
+            raise ProviderDefinitiveError("durable capture reservation changed before dispatch")
         token = self._oauth_token()
         try:
             response = self._session.post(
-                SANDBOX_BASE_URL + ORDERS_PATH + "/" + quote(order_id, safe="") + "/capture",
+                self._provider_url(ORDERS_PATH + "/" + quote(order_id, safe="") + "/capture"),
                 json={},
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                          "Accept": "application/json", "Prefer": "return=representation",

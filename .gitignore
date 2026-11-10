@@ -2,3 +2,30 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.py[cod]
+
+# Local environment and secret configuration (keep placeholder examples trackable).
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.env
+.envrc
+.envrc.*
+
+# Local SQLite runtime databases and their write-ahead/journal sidecars.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Keep intentional checked-in test fixtures trackable; no such fixture exists today.
+!tests/fixtures/**/*.db*
+!tests/fixtures/**/*.sqlite*

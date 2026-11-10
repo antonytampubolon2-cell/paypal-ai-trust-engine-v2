@@ -8,6 +8,7 @@ import pytest
 import requests
 from cryptography.hazmat.primitives.asymmetric import ec
 
+import paypal_rest
 from paypal_rest import ORDERS_PATH, SANDBOX_BASE_URL, TOKEN_PATH, PayPalRestOrdersProvider
 from trustguard import (
     CanonicalTransaction,
@@ -15,6 +16,7 @@ from trustguard import (
     Ledger,
     LedgerError,
     ProviderAmbiguousError,
+    ProviderDefinitiveError,
     RiskScreeningPipeline,
     SecurityError,
     TrustConfig,
@@ -221,7 +223,8 @@ def auth_material(*, suffix="1", grant_limit=10000, access_key=None):
 
 def make_provider(monkeypatch, session, config):
     set_paypal_env(monkeypatch)
-    return PayPalRestOrdersProvider(config, session=session)
+    monkeypatch.setattr(paypal_rest, "_new_sandbox_session", lambda: session)
+    return PayPalRestOrdersProvider(config)
 
 
 def make_flow(monkeypatch, tmp_path, *, session, scorer=None):
@@ -232,6 +235,24 @@ def make_flow(monkeypatch, tmp_path, *, session, scorer=None):
     tx = transaction()
     created = guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)
     return guard, ledger, provider, tx, created
+
+
+def prepare_direct_capture(monkeypatch, tmp_path, *, suffix, tx, preflight_order):
+    config, token, proof = auth_material(suffix=suffix)
+    session = FakeSession(
+        post=[
+            FakeResponse(200, {"access_token": "synthetic-token", "expires_in": 3600}),
+            FakeResponse(201, paypal_order(tx)),
+        ],
+        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, preflight_order)],
+    )
+    provider = make_provider(monkeypatch, session, config)
+    ledger = Ledger(tmp_path / f"direct-{suffix}.sqlite")
+    guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
+    assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
+    assert guard.reconcile(tx.transaction_id)["status"] == "APPROVED"
+    request_id = ledger.begin_capture(tx.transaction_id, ORDER_ID)
+    return provider, ledger, tx, request_id, session
 
 
 def paypal_posts(session, suffix):
@@ -290,7 +311,8 @@ def test_skyfire_mapping_is_explicit_and_missing_or_inconsistent_mapping_blocks_
             monkeypatch.setenv("TRUSTGUARD_PAYPAL_MAPPED_SKYFIRE_SERVICE_ID", mapped_service)
         monkeypatch.setenv("SKYFIRE_SELLER_SERVICE_ID", seller_service)
         session = FakeSession()
-        provider = PayPalRestOrdersProvider(config, session=session)
+        monkeypatch.setattr(paypal_rest, "_new_sandbox_session", lambda: session)
+        provider = PayPalRestOrdersProvider(config)
         with pytest.raises(ConfigurationError):
             provider.create_order(tx)
         assert session.calls == []
@@ -309,6 +331,7 @@ def test_authorize_low5_grant100_then_explicit_capture_verifies_get_and_is_idemp
         ],
         get=[
             FakeResponse(200, paypal_order(tx, "APPROVED")),
+            FakeResponse(200, paypal_order(tx, "APPROVED")),
             FakeResponse(200, completed_order(tx)),
         ],
     )
@@ -321,7 +344,7 @@ def test_authorize_low5_grant100_then_explicit_capture_verifies_get_and_is_idemp
     assert created["payment_completed"] is False
     assert ledger.get(tx.transaction_id)["status"] == "CREATED"
 
-    completed = guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
+    completed = guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
     assert completed["status"] == "COMPLETED"
     assert completed["payment_completed"] is True
     assert completed["capture_ids"] == [CAPTURE_ID]
@@ -331,7 +354,7 @@ def test_authorize_low5_grant100_then_explicit_capture_verifies_get_and_is_idemp
     token2_config, token2, proof2 = auth_material(suffix="second", grant_limit=10000, access_key=signing_key)
     assert token2_config.issuer == config.issuer
     assert guard.authorize_and_dispatch(token2, proof2, "POST", CHECKOUT_URL, tx)["status"] == "COMPLETED"
-    assert guard.capture_approved_order(tx.transaction_id, buyer_approved=True)["status"] == "COMPLETED"
+    assert guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)["status"] == "COMPLETED"
 
     create_posts = paypal_posts(session, ORDERS_PATH)
     capture_posts = paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture")
@@ -341,8 +364,118 @@ def test_authorize_low5_grant100_then_explicit_capture_verifies_get_and_is_idemp
     assert capture_posts[0][2]["headers"]["PayPal-Request-Id"] == ledger.get(tx.transaction_id)["capture_request_id"]
     assert create_posts[0][2]["headers"]["PayPal-Request-Id"] != capture_posts[0][2]["headers"]["PayPal-Request-Id"]
     assert capture_posts[0][2]["json"] == {}
+    capture_post_index = session.calls.index(capture_posts[0])
+    order_get_indices = [
+        index for index, call in enumerate(session.calls)
+        if call[0] == "GET" and call[1] == SANDBOX_BASE_URL + ORDERS_PATH + "/" + ORDER_ID
+    ]
+    assert len([index for index in order_get_indices if index < capture_post_index]) == 2
+    assert max(index for index in order_get_indices if index < capture_post_index) < capture_post_index
+    assert order_get_indices[-1] > capture_post_index
     assert all(call[1].startswith(SANDBOX_BASE_URL) for call in session.calls)
     assert sum(call[1] == SANDBOX_BASE_URL + TOKEN_PATH for call in session.calls) == 1
+
+
+def test_direct_adapter_capture_requires_ledger_reservation_and_rejects_forged_flag(monkeypatch, tmp_path):
+    config, _, _ = auth_material(suffix="direct-no-reservation")
+    tx = transaction()
+    session = FakeSession()
+    provider = make_provider(monkeypatch, session, config)
+    ledger = Ledger(tmp_path / "direct-no-reservation.sqlite")
+    with pytest.raises(TypeError, match="ledger"):
+        provider.capture_order(tx, ORDER_ID, "forged-request-id")
+    with pytest.raises(ProviderDefinitiveError, match="durable TrustGuard capture reservation"):
+        provider.capture_order(tx, ORDER_ID, "forged-request-id", ledger=ledger)
+    with pytest.raises(TypeError, match="operator_confirmed"):
+        provider.capture_order(tx, ORDER_ID, "forged-request-id", ledger=ledger, operator_confirmed=True)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("failure", ["pending", "wrong_order_id", "merchant", "amount", "currency", "reference", "missing_purchase_unit"])
+def test_direct_adapter_capture_requires_fresh_bound_approved_order(monkeypatch, tmp_path, failure):
+    tx = transaction(transaction_id=f"tx-direct-{failure}", idempotency_key=f"idem-direct-{failure}")
+    if failure == "pending":
+        preflight = paypal_order(tx, "CREATED")
+    elif failure == "wrong_order_id":
+        preflight = paypal_order(tx, "APPROVED", order_id="OTHER-ORDER")
+    elif failure == "merchant":
+        preflight = paypal_order(tx, "APPROVED", unit=order_unit(tx, merchant="attacker-merchant"))
+    elif failure == "amount":
+        preflight = paypal_order(tx, "APPROVED", unit=order_unit(tx, amount="4.99"))
+    elif failure == "currency":
+        preflight = paypal_order(tx, "APPROVED", unit=order_unit(tx, currency="EUR"))
+    elif failure == "reference":
+        unit = order_unit(tx)
+        unit["reference_id"] = "other-transaction"
+        preflight = paypal_order(tx, "APPROVED", unit=unit)
+    else:
+        preflight = {"id": ORDER_ID, "status": "APPROVED", "purchase_units": []}
+    provider, ledger, tx, request_id, session = prepare_direct_capture(
+        monkeypatch, tmp_path, suffix=f"mismatch-{failure}", tx=tx, preflight_order=preflight,
+    )
+    with pytest.raises(ProviderAmbiguousError):
+        provider.capture_order(tx, ORDER_ID, request_id, ledger=ledger)
+    assert paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture") == []
+
+
+def test_direct_adapter_capture_gets_approval_before_post_and_reservation_is_one_shot(monkeypatch, tmp_path):
+    tx = transaction(transaction_id="tx-direct-valid", idempotency_key="idem-direct-valid")
+    provider, ledger, tx, request_id, session = prepare_direct_capture(
+        monkeypatch, tmp_path, suffix="valid", tx=tx, preflight_order=paypal_order(tx, "APPROVED"),
+    )
+    session.post_responses.extend([FakeResponse(201, {"id": ORDER_ID, "status": "COMPLETED"})])
+    session.get_responses.append(FakeResponse(200, completed_order(tx)))
+
+    result = provider.capture_order(tx, ORDER_ID, request_id, ledger=ledger)
+    assert result["status"] == "COMPLETED"
+    capture_posts = paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture")
+    assert len(capture_posts) == 1
+    capture_post_index = session.calls.index(capture_posts[0])
+    order_get_indices = [
+        index for index, call in enumerate(session.calls)
+        if call[0] == "GET" and call[1] == SANDBOX_BASE_URL + ORDERS_PATH + "/" + ORDER_ID
+    ]
+    assert len([index for index in order_get_indices if index < capture_post_index]) == 2
+    assert order_get_indices[-1] > capture_post_index
+    with pytest.raises(ProviderDefinitiveError, match="unused durable TrustGuard capture reservation"):
+        provider.capture_order(tx, ORDER_ID, request_id, ledger=ledger)
+    assert len(paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture")) == 1
+
+
+def test_changed_provider_state_between_guard_and_adapter_checks_never_posts_capture(monkeypatch, tmp_path):
+    config, token, proof = auth_material(suffix="state-changed")
+    tx = transaction(transaction_id="tx-state-changed", idempotency_key="idem-state-changed")
+    session = FakeSession(
+        post=[
+            FakeResponse(200, {"access_token": "synthetic-token", "expires_in": 3600}),
+            FakeResponse(201, paypal_order(tx)),
+        ],
+        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, paypal_order(tx, "CREATED"))],
+    )
+    provider = make_provider(monkeypatch, session, config)
+    ledger = Ledger(tmp_path / "state-changed.sqlite")
+    guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
+    assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
+
+    result = guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
+    assert result["status"] == "UNKNOWN"
+    assert ledger.get(tx.transaction_id)["status"] == "UNKNOWN"
+    assert ledger.get(tx.transaction_id)["capture_request_id"]
+    assert paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture") == []
+
+
+def test_legacy_capture_attempt_is_migrated_as_consumed(tmp_path):
+    db_path = tmp_path / "legacy-capture-attempt.sqlite"
+    db = sqlite3.connect(db_path)
+    db.execute("CREATE TABLE capture_attempts (transaction_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, started_at REAL NOT NULL)")
+    db.execute("INSERT INTO capture_attempts VALUES(?,?,?)", ("old-transaction", "old-request", 1.0))
+    db.commit()
+    db.close()
+
+    Ledger(db_path)
+    with sqlite3.connect(db_path) as db:
+        row = db.execute("SELECT dispatch_claimed FROM capture_attempts WHERE transaction_id=?", ("old-transaction",)).fetchone()
+    assert row == (1,)
 
 
 def test_capture_status_marker_is_persisted_before_capture_post(monkeypatch, tmp_path):
@@ -354,7 +487,7 @@ def test_capture_status_marker_is_persisted_before_capture_post(monkeypatch, tmp
             FakeResponse(201, paypal_order(tx)),
             FakeResponse(201, {"id": ORDER_ID, "status": "COMPLETED"}),
         ],
-        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, completed_order(tx))],
+        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, completed_order(tx))],
     )
     provider = make_provider(monkeypatch, session, config)
     ledger = Ledger(tmp_path / "marker.sqlite")
@@ -364,12 +497,12 @@ def test_capture_status_marker_is_persisted_before_capture_post(monkeypatch, tmp
     observed = {}
     original_capture = provider.capture_order
 
-    def capture_after_marker(canonical_tx, order_id, request_id):
+    def capture_after_marker(canonical_tx, order_id, request_id, *, ledger):
         observed["record"] = ledger.get(canonical_tx.transaction_id)
-        return original_capture(canonical_tx, order_id, request_id)
+        return original_capture(canonical_tx, order_id, request_id, ledger=ledger)
 
     provider.capture_order = capture_after_marker
-    assert guard.capture_approved_order(tx.transaction_id, buyer_approved=True)["status"] == "COMPLETED"
+    assert guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)["status"] == "COMPLETED"
     assert observed["record"]["status"] == "DISPATCH_STARTED"
     assert observed["record"]["capture_request_id"].startswith("cap-")
 
@@ -392,13 +525,13 @@ def test_capture_get_binding_mismatch_is_unknown(monkeypatch, tmp_path, bad_unit
             FakeResponse(201, paypal_order(tx)),
             FakeResponse(201, {"id": ORDER_ID, "status": "COMPLETED"}),
         ],
-        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, mismatch)],
+        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, mismatch)],
     )
     provider = make_provider(monkeypatch, session, config)
     ledger = Ledger(tmp_path / f"mismatch-{len(bad_unit)}.sqlite")
     guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
     assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
-    result = guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
+    result = guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
     assert result == {"status": "UNKNOWN", "transaction_id": tx.transaction_id, "payment_completed": False}
     assert ledger.get(tx.transaction_id)["status"] == "UNKNOWN"
     assert len(paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture")) == 1
@@ -448,7 +581,7 @@ def test_hold_and_review_released_never_checkout_or_capture(monkeypatch, tmp_pat
             assert review["transaction_state"] == "REVIEW_RELEASED"
         assert ledger.get(tx.transaction_id)["status"] == expected_status
         with pytest.raises(SecurityError):
-            guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
+            guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
         assert session.calls == []
 
 
@@ -464,6 +597,7 @@ def test_capture_timeout_becomes_unknown_and_reconcile_approved_never_retries(mo
         get=[
             FakeResponse(200, paypal_order(tx, "APPROVED")),
             FakeResponse(200, paypal_order(tx, "APPROVED")),
+            FakeResponse(200, paypal_order(tx, "APPROVED")),
         ],
     )
     provider = make_provider(monkeypatch, session, config)
@@ -471,7 +605,7 @@ def test_capture_timeout_becomes_unknown_and_reconcile_approved_never_retries(mo
     guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
     assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
 
-    first = guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
+    first = guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
     assert first["status"] == "UNKNOWN"
     record = ledger.get(tx.transaction_id)
     assert record["status"] == "UNKNOWN"
@@ -482,11 +616,11 @@ def test_capture_timeout_becomes_unknown_and_reconcile_approved_never_retries(mo
     assert reconciled["status"] == "APPROVED"
     assert ledger.get(tx.transaction_id)["capture_request_id"] == request_id
     with pytest.raises(LedgerError, match="capture already started"):
-        guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
+        guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
     assert len(paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture")) == 1
 
 
-def test_missing_explicit_buyer_approval_makes_no_provider_calls(monkeypatch, tmp_path):
+def test_missing_operator_confirmation_makes_no_provider_calls(monkeypatch, tmp_path):
     config, token, proof = auth_material(suffix="no-buyer")
     tx = transaction()
     session = FakeSession(
@@ -500,8 +634,58 @@ def test_missing_explicit_buyer_approval_makes_no_provider_calls(monkeypatch, tm
     guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
     assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
     calls_after_create = list(session.calls)
-    with pytest.raises(SecurityError, match="explicit buyer approval"):
+    with pytest.raises(SecurityError, match="explicit operator confirmation"):
         guard.capture_approved_order(tx.transaction_id)
+    assert session.calls == calls_after_create
+
+
+@pytest.mark.parametrize("failure", ["pending", "wrong_order_id", "merchant", "amount", "currency", "incomplete"])
+def test_operator_confirmation_does_not_substitute_for_verified_paypal_approval(monkeypatch, tmp_path, failure):
+    config, token, proof = auth_material(suffix=f"approval-{failure}")
+    tx = transaction(transaction_id=f"tx-approval-{failure}", idempotency_key=f"idem-approval-{failure}")
+    if failure == "pending":
+        approval_response = paypal_order(tx, "CREATED")
+    elif failure == "wrong_order_id":
+        approval_response = paypal_order(tx, "APPROVED", order_id="ATTACKER-ORDER")
+    elif failure == "merchant":
+        approval_response = paypal_order(tx, "APPROVED", unit=order_unit(tx, merchant="attacker-merchant"))
+    elif failure == "amount":
+        approval_response = paypal_order(tx, "APPROVED", unit=order_unit(tx, amount="4.99"))
+    elif failure == "currency":
+        approval_response = paypal_order(tx, "APPROVED", unit=order_unit(tx, currency="EUR"))
+    else:
+        approval_response = {"id": ORDER_ID, "status": "APPROVED", "purchase_units": [{}]}
+    session = FakeSession(
+        post=[
+            FakeResponse(200, {"access_token": "synthetic-token", "expires_in": 3600}),
+            FakeResponse(201, paypal_order(tx)),
+        ],
+        get=[FakeResponse(200, approval_response)],
+    )
+    provider = make_provider(monkeypatch, session, config)
+    ledger = Ledger(tmp_path / f"approval-{failure}.sqlite")
+    guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
+    assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
+    with pytest.raises(SecurityError, match="PayPal has not verified buyer approval"):
+        guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
+    assert paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture") == []
+    assert ledger.get(tx.transaction_id)["capture_request_id"] is None
+
+
+def test_buyer_approved_keyword_is_not_accepted_as_provider_evidence(monkeypatch, tmp_path):
+    config, token, proof = auth_material(suffix="legacy-approval-keyword")
+    tx = transaction()
+    session = FakeSession(post=[
+        FakeResponse(200, {"access_token": "synthetic-token", "expires_in": 3600}),
+        FakeResponse(201, paypal_order(tx)),
+    ])
+    provider = make_provider(monkeypatch, session, config)
+    ledger = Ledger(tmp_path / "legacy-approval-keyword.sqlite")
+    guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
+    assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
+    calls_after_create = list(session.calls)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'buyer_approved'"):
+        guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
     assert session.calls == calls_after_create
 
 
@@ -533,7 +717,7 @@ def test_capture_persistence_trigger_failure_blocks_capture_post(monkeypatch, tm
     db.close()
 
     with pytest.raises(sqlite3.IntegrityError, match="capture marker persistence failed"):
-        guard.capture_approved_order(tx.transaction_id, buyer_approved=True)
+        guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)
     assert ledger.get(tx.transaction_id)["status"] == "APPROVED"
     assert ledger.get(tx.transaction_id)["capture_request_id"] is None
     assert paypal_posts(session, ORDERS_PATH + "/" + ORDER_ID + "/capture") == []
@@ -548,14 +732,14 @@ def test_completed_capture_evidence_and_marker_survive_ledger_reopen(monkeypatch
             FakeResponse(201, paypal_order(tx)),
             FakeResponse(201, {"id": ORDER_ID, "status": "COMPLETED"}),
         ],
-        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, completed_order(tx))],
+        get=[FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, paypal_order(tx, "APPROVED")), FakeResponse(200, completed_order(tx))],
     )
     provider = make_provider(monkeypatch, session, config)
     db_path = tmp_path / "reopen.sqlite"
     ledger = Ledger(db_path)
     guard = TrustGuard(config, ledger, provider, risk_scorer=FixedRiskScorer())
     assert guard.authorize_and_dispatch(token, proof, "POST", CHECKOUT_URL, tx)["status"] == "CREATED"
-    assert guard.capture_approved_order(tx.transaction_id, buyer_approved=True)["status"] == "COMPLETED"
+    assert guard.capture_approved_order(tx.transaction_id, operator_confirmed=True)["status"] == "COMPLETED"
     before = ledger.get(tx.transaction_id)
     assert before["capture_request_id"]
     assert any(e["operation"] == "capture" and e["result"]["verified_capture"] for e in before["provider_evidence"])
@@ -566,7 +750,7 @@ def test_completed_capture_evidence_and_marker_survive_ledger_reopen(monkeypatch
     assert after["capture_request_id"] == before["capture_request_id"]
     assert after["provider_evidence"] == before["provider_evidence"]
     reopened_guard = TrustGuard(config, reopened, provider, risk_scorer=FixedRiskScorer())
-    assert reopened_guard.capture_approved_order(tx.transaction_id, buyer_approved=True) == {
+    assert reopened_guard.capture_approved_order(tx.transaction_id, operator_confirmed=True) == {
         "status": "COMPLETED",
         "transaction_id": tx.transaction_id,
         "payment_completed": True,

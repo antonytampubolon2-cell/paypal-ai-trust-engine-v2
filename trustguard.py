@@ -281,7 +281,8 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS capture_attempts (
                     transaction_id TEXT PRIMARY KEY,
                     request_id TEXT NOT NULL UNIQUE,
-                    started_at REAL NOT NULL
+                    started_at REAL NOT NULL,
+                    dispatch_claimed INTEGER NOT NULL DEFAULT 1 CHECK(dispatch_claimed IN (0,1))
                 );
                 CREATE TABLE IF NOT EXISTS provider_evidence (
                     evidence_id INTEGER PRIMARY KEY,
@@ -291,6 +292,11 @@ class Ledger:
                     recorded_at REAL NOT NULL
                 );
             """)
+            capture_columns = {row[1] for row in db.execute("PRAGMA table_info(capture_attempts)")}
+            if "dispatch_claimed" not in capture_columns:
+                # Existing attempts may already have reached PayPal. Treat them as
+                # consumed so an upgrade cannot replay an uncertain capture.
+                db.execute("ALTER TABLE capture_attempts ADD COLUMN dispatch_claimed INTEGER NOT NULL DEFAULT 1 CHECK(dispatch_claimed IN (0,1))")
             schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").fetchone()[0]
             columns = {row[1] for row in db.execute("PRAGMA table_info(transactions)")}
             if ("'SCREENED_ALLOW'" not in schema or "'REVIEW_RELEASED'" not in schema
@@ -577,6 +583,83 @@ class Ledger:
         finally:
             db.close()
 
+    @staticmethod
+    def _capture_request_id(transaction_id: str, expected_order_id: str) -> str:
+        return "cap-" + hashlib.sha256((transaction_id + ":" + expected_order_id).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def _capture_record_matches(
+        db: sqlite3.Connection,
+        tx: CanonicalTransaction,
+        expected_order_id: str,
+        request_id: str,
+        *,
+        dispatch_claimed: bool,
+    ) -> bool:
+        if (not isinstance(tx, CanonicalTransaction)
+                or isinstance(tx.amount_minor, bool) or not isinstance(tx.amount_minor, int) or tx.amount_minor <= 0
+                or not isinstance(tx.transaction_id, str) or not tx.transaction_id
+                or not isinstance(expected_order_id, str) or not expected_order_id
+                or not isinstance(request_id, str) or not request_id
+                or request_id != Ledger._capture_request_id(tx.transaction_id, expected_order_id)):
+            return False
+        row = db.execute(
+            """SELECT t.transaction_id,t.idempotency_key,t.amount_minor,t.currency,t.payee,
+                      t.skyfire_service_id,t.paypal_merchant_id,t.status,t.provider_order_id,
+                      r.decision,c.request_id,c.dispatch_claimed
+               FROM transactions AS t
+               LEFT JOIN risk_assessments AS r USING(transaction_id)
+               LEFT JOIN capture_attempts AS c USING(transaction_id)
+               WHERE t.transaction_id=?""",
+            (tx.transaction_id,),
+        ).fetchone()
+        return bool(
+            row
+            and row[0] == tx.transaction_id
+            and row[1] == tx.idempotency_key
+            and row[2] == tx.amount_minor
+            and row[3] == tx.currency
+            and row[4] == tx.payee
+            and row[5] == tx.skyfire_service_id
+            and row[6] == tx.paypal_merchant_id
+            and row[7] == "DISPATCH_STARTED"
+            and row[8] == expected_order_id
+            and row[9] == "ALLOW"
+            and row[10] == request_id
+            and row[11] == int(dispatch_claimed)
+        )
+
+    def claim_capture_dispatch(self, tx: CanonicalTransaction, expected_order_id: str, request_id: str) -> bool:
+        """Atomically consume the persisted capture reservation exactly once."""
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._capture_record_matches(db, tx, expected_order_id, request_id, dispatch_claimed=False):
+                db.rollback()
+                return False
+            cursor = db.execute(
+                "UPDATE capture_attempts SET dispatch_claimed=1 WHERE transaction_id=? AND request_id=? AND dispatch_claimed=0",
+                (tx.transaction_id, request_id),
+            )
+            if cursor.rowcount != 1:
+                db.rollback()
+                return False
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def capture_dispatch_claim_valid(self, tx: CanonicalTransaction, expected_order_id: str, request_id: str) -> bool:
+        """Recheck the canonical transaction and consumed durable reservation before POST."""
+        db = self._connect()
+        try:
+            return self._capture_record_matches(db, tx, expected_order_id, request_id, dispatch_claimed=True)
+        finally:
+            db.close()
+
     def begin_capture(self, transaction_id: str, expected_order_id: str) -> str:
         """One durable capture dispatch per transaction, including after UNKNOWN/restart."""
         db = self._connect()
@@ -590,8 +673,11 @@ class Ledger:
                 raise LedgerError("capture requires approved order, canonical merchant, and durable ML ALLOW")
             if db.execute("SELECT 1 FROM capture_attempts WHERE transaction_id=?", (transaction_id,)).fetchone():
                 raise LedgerError("capture already started; reconciliation only")
-            request_id = "cap-" + hashlib.sha256((transaction_id + ":" + expected_order_id).encode()).hexdigest()[:32]
-            db.execute("INSERT INTO capture_attempts VALUES(?,?,?)", (transaction_id, request_id, time.time()))
+            request_id = self._capture_request_id(transaction_id, expected_order_id)
+            db.execute(
+                "INSERT INTO capture_attempts(transaction_id,request_id,started_at,dispatch_claimed) VALUES(?,?,?,0)",
+                (transaction_id, request_id, time.time()),
+            )
             db.execute("UPDATE transactions SET status='DISPATCH_STARTED',updated_at=? WHERE transaction_id=? AND status='APPROVED'", (time.time(), transaction_id))
             db.commit()
             return request_id
@@ -887,14 +973,16 @@ class TrustGuard:
             self.ledger.record_provider_evidence(transaction_id, result if status != "UNKNOWN" else {"id": order_id, "status": "UNKNOWN"})
         return {"status": status, "transaction_id": transaction_id, "provider_order_id": order_id, "payment_completed": status == "COMPLETED" and result.get("verified_capture") is True, "capture_ids": result.get("capture_ids", []) if status == "COMPLETED" else []}
 
-    def capture_approved_order(self, transaction_id: str, *, buyer_approved: bool = False) -> dict[str, Any]:
-        """Explicit local approval plus verified provider APPROVED, never a callback alone.
+    def capture_approved_order(self, transaction_id: str, *, operator_confirmed: bool = False) -> dict[str, Any]:
+        """Explicit local operator intent plus a fresh, verified provider APPROVED state.
 
-        No transaction terms are accepted from the caller. Once a capture attempt
-        exists, all future actions are reconciliation-only, even if GET says APPROVED.
+        The boolean is not evidence of buyer approval; only a server-side provider
+        GET bound to the ledger transaction can establish APPROVED. No transaction
+        terms are accepted from the caller. Once a capture attempt exists, all
+        future actions are reconciliation-only, even if GET says APPROVED.
         """
-        if buyer_approved is not True:
-            raise SecurityError("explicit buyer approval completion is required")
+        if operator_confirmed is not True:
+            raise SecurityError("explicit operator confirmation is required")
         if self.provider is None or not hasattr(self.provider, "capture_order"):
             raise ConfigurationError("capture provider is not configured")
         record = self.ledger.get(transaction_id)
@@ -923,7 +1011,7 @@ class TrustGuard:
         )
         request_id = self.ledger.begin_capture(transaction_id, record["provider_order_id"])
         try:
-            result = self.provider.capture_order(tx, record["provider_order_id"], request_id)
+            result = self.provider.capture_order(tx, record["provider_order_id"], request_id, ledger=self.ledger)
         except Exception:
             self.ledger.transition(transaction_id, "UNKNOWN", record["provider_order_id"],
                                    provider_result={"id": record["provider_order_id"], "status": "UNKNOWN"}, operation="capture")

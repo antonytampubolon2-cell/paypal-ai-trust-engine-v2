@@ -402,7 +402,7 @@ def run_demo(*, input_fn=input, output_fn=print, error_fn=print) -> int:
             return 3
         output_fn(json.dumps({"stage": "BUYER_APPROVED", "payment_completed": False}, sort_keys=True))
         # Main TrustGuard owns the provider GET APPROVED verification and capture.
-        capture_result = guard.capture_approved_order(transaction_id, buyer_approved=True)
+        capture_result = guard.capture_approved_order(transaction_id, operator_confirmed=True)
         output_fn(json.dumps(_public_result(capture_result), sort_keys=True))
         if _public_result(capture_result).get("status") == "UNKNOWN":
             output_fn("Capture outcome is ambiguous; stop and reconcile manually. No retry was attempted.")
