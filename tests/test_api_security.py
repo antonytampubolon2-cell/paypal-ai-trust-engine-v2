@@ -73,6 +73,7 @@ def test_high_cardinality_cannot_grow_rate_state_past_capacity():
     capacity = 24
     guard = RequestGuardMiddleware(
         ok_app, rate_limit_requests=100, max_rate_limit_state_entries=capacity,
+        clock=lambda: 12.25,
     )
 
     statuses = [make_request(guard, f"198.51.100.{index}")[0] for index in range(1000)]

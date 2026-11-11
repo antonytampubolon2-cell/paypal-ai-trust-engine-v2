@@ -212,7 +212,7 @@ def test_valid_es256_tokens_and_all_supported_types(tmp_path):
     ({"env": "production"}, "kya-pay+jwt"),
     ({"tsi": "another-service"}, "kya-pay+jwt"),
     ({"exp": int(time.time()) - 10}, "kya-pay+jwt"),
-    ({"iat": int(time.time()) + 360}, "kya-pay+jwt"),
+    ({"iat": "__FUTURE_IAT__"}, "kya-pay+jwt"),
     ({"jti": ""}, "kya-pay+jwt"),
     ({"amt": "not-money"}, "pay+jwt"),
     ({"amt": "0"}, "pay+jwt"),
@@ -222,6 +222,9 @@ def test_valid_es256_tokens_and_all_supported_types(tmp_path):
     ({"stp": "other"}, "pay+jwt"),
 ])
 def test_invalid_claims_rejected(tmp_path, overrides, typ):
+    # Calculate future timestamps at test execution time.
+    if overrides.get("iat") == "__FUTURE_IAT__":
+        overrides = {**overrides, "iat": int(time.time()) + 360}
     private, jwk = signing_material()
     with pytest.raises(SkyfireTokenError):
         verifier(settings(tmp_path), jwk).verify(make_token(private, typ=typ, overrides=overrides))
