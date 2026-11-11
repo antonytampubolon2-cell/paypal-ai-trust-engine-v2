@@ -1,94 +1,233 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>PayPal AI Trust Engine v2</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayPal AI Trust Engine — Demo Dashboard</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: 'Segoe UI', Arial, sans-serif;
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    color: #e2e8f0; min-height: 100vh; padding: 40px 20px;
-  }
-  .container { max-width: 1000px; margin: 0 auto; }
-  h1 { font-size: 36px; color: #60a5fa; margin-bottom: 8px; text-align: center; }
-  .subtitle { text-align: center; color: #94a3b8; margin-bottom: 40px; font-size: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
-  .card { background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; border-radius: 12px; padding: 24px; }
-  .card h3 { font-size: 18px; margin-bottom: 12px; color: #f1f5f9; }
-  .card p { font-size: 14px; color: #cbd5e1; margin-bottom: 8px; line-height: 1.6; }
-  .status-ok { display: inline-block; background: #10b981; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
-  .orders { background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; border-radius: 12px; padding: 24px; margin-bottom: 30px; }
-  .orders h3 { color: #60a5fa; margin-bottom: 16px; }
-  .order-id { font-family: 'Courier New', monospace; background: #0f172a; padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; color: #34d399; font-size: 14px; }
-  .audit-item { padding: 8px 12px; border-left: 3px solid #60a5fa; margin-bottom: 8px; background: #0f172a; font-size: 13px; }
-  .footer { text-align: center; color: #64748b; font-size: 13px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #334155; }
-  .stat-box { display: inline-block; background: #1e293b; padding: 16px 24px; border-radius: 8px; margin-right: 12px; text-align: center; }
-  .stat-number { font-size: 32px; font-weight: bold; color: #34d399; display: block; }
-  .stat-label { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px 18px; font-family: system-ui, Arial, sans-serif; color: #e2e8f0; background: #0f172a; }
+  main { max-width: 980px; margin: auto; }
+  h1 { color: #93c5fd; text-align: center; }
+  .notice, section, .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 18px; margin: 14px 0; }
+  .notice { border-color: #f59e0b; color: #fde68a; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .state { color: #fbbf24; font-weight: 700; }
+  .row { padding: 8px 0; border-bottom: 1px solid #334155; overflow-wrap: anywhere; }
+  .muted { color: #94a3b8; }
 </style>
 </head>
 <body>
-<div class="container">
+<main>
   <h1>PayPal AI Trust Engine</h1>
-  <p class="subtitle">Live Data dari hasil.json</p>
-
-  <div class="grid">
-    <div class="card"><h3>KYAPay Token Verifier</h3><p>Validasi identitas agen AI.</p><span class="status-ok">AKTIF</span></div>
-    <div class="card"><h3>JTI Anti-Replay Cache</h3><p>Mencegah penggunaan ulang token.</p><span class="status-ok">AKTIF</span></div>
-    <div class="card"><h3>DPoP Binding (RFC 9449)</h3><p>Pengikatan kriptografis.</p><span class="status-ok">AKTIF</span></div>
-<div class="card"><h3>Fraud Risk Engine (FRP)</h3><p>Deteksi anomali transaksi mencurigakan.</p><span class="status-ok">AKTIF</span></div>
-  </div>
-
-  <div class="orders">
-    <h3>Statistik</h3>
-    <div id="statistik-area">Memuat data...</div>
-  </div>
-
-  <div class="orders">
-    <h3>Transaksi Terakhir</h3>
-    <div id="transaksi-area">Memuat data...</div>
-  </div>
-
-  <div class="orders">
-    <h3>Audit Trail</h3>
-    <div id="audit-area">Memuat data...</div>
-  </div>
-
-  <div class="footer">
-    <span id="timestamp">-</span> | PayPal AI Trust Engine
-  </div>
-</div>
-
+  <div class="notice"><strong>DEMO / SIMULATED</strong> — This static dashboard is not connected to a live backend or PayPal. It is not evidence of a real order, payment, or active security control.</div>
+  <section>
+    <h2>ML anomaly screening — backend code, not this dashboard</h2>
+    <p>The separate TrustGuard transaction path runs a scikit-learn IsolationForest (`trustguard-isolation-forest-synthetic-v1`) using a deterministic synthetic baseline dataset (`synthetic-normal-transaction-features-seed-20261104-v1`). Its anomaly score is not a calibrated fraud probability; this model is not production validated. `POST /v1/agent/authorize` only validates Skyfire tokens and does not invoke transaction scoring. This static page runs no model inference.</p>
+    <p>In the TrustGuard path, a high score or scoring/model failure places the already-authorized transaction on durable HOLD before provider dispatch. PayPal dispatch remains disabled by default.</p>
+  </section>
+  <section>
+    <h2>Risk explanation — static visualization</h2>
+    <p>This view only displays explanation fields already present in sample data or a locally selected screening API JSON response. It does not independently verify imported data, run model inference, request tokens, call an external provider, or override a backend decision.</p>
+    <label for="risk-json-file">Load local judge-demo JSON (offline report or screening response): </label>
+    <input id="risk-json-file" type="file" accept="application/json,.json">
+    <p id="risk-import-status" class="muted">No local demo report loaded. Imported files are displayed as unverified local evidence.</p>
+    <div id="risk-assessment" class="muted">No valid risk assessment is available.</div>
+    <div id="provider-safety-summary" class="card" aria-live="polite">
+      <strong>Provider Safety</strong>
+      <div class="row">Provider invocations: UNAVAILABLE — NOT VERIFIED</div>
+      <div class="row">PayPal dispatch: UNAVAILABLE — NOT VERIFIED</div>
+    </div>
+    <div id="scenario-report" class="muted">No offline scenario report loaded.</div>
+  </section>
+  <div class="grid" id="controls"></div>
+  <section><h2>Transaction evidence</h2><div id="transaction" class="muted">No live transaction evidence is connected.</div></section>
+  <section><h2>Demo statistics</h2><div id="statistics" class="muted">No verified backend statistics are connected.</div></section>
+  <section><h2>Demo audit events</h2><div id="audit" class="muted">No verified backend audit events are connected.</div></section>
+  <p id="timestamp" class="muted">Source data timestamp: unavailable</p>
+</main>
 <script>
+'use strict';
+function addText(parent, label, value) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const name = document.createElement('strong');
+  name.textContent = `${label}: `;
+  const text = document.createElement('span');
+  text.textContent = String(value ?? 'unavailable');
+  row.append(name, text);
+  parent.append(row);
+}
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function validNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+function validRiskAssessment(data) {
+  const assessment = isRecord(data) ? data.risk_assessment : null;
+  const validScoredAt = assessment && ((typeof assessment.scored_at === 'number' && Number.isFinite(assessment.scored_at)) || validNonEmptyString(assessment.scored_at));
+  if (!isRecord(assessment) || !Number.isFinite(assessment.anomaly_score) || assessment.anomaly_score < 0 || assessment.anomaly_score > 1 || !validNonEmptyString(assessment.model_version) || !validNonEmptyString(assessment.training_dataset_id) || !validScoredAt || !validNonEmptyString(assessment.decision)) return null;
+  const explanation = assessment.explanation;
+  if (!isRecord(explanation) || !validNonEmptyString(explanation.version) || !Array.isArray(explanation.reason_codes) || !explanation.reason_codes.every(validNonEmptyString) || !validNonEmptyString(explanation.summary) || !Array.isArray(explanation.feature_signals) || !validNonEmptyString(explanation.method)) return null;
+  if (!explanation.feature_signals.every(signal => isRecord(signal) && validNonEmptyString(signal.feature) && Number.isFinite(signal.value) && validNonEmptyString(signal.reason_code) && validNonEmptyString(signal.description))) return null;
+  return assessment;
+}
+function showRiskUnavailable(message) {
+  const target = document.getElementById('risk-assessment');
+  target.textContent = '';
+  addText(target, 'Risk explanation', message);
+}
+function renderRiskAssessment(assessment, source) {
+  const target = document.getElementById('risk-assessment');
+  target.textContent = '';
+  addText(target, 'Source', source);
+  addText(target, 'Model version', assessment.model_version);
+  addText(target, 'Training dataset', assessment.training_dataset_id);
+  addText(target, 'Decision', assessment.decision);
+  addText(target, 'Scored at', assessment.scored_at);
+  addText(target, 'Anomaly ranking score (not fraud probability)', assessment.anomaly_score);
+  addText(target, 'Explanation version', assessment.explanation.version);
+  addText(target, 'Method', assessment.explanation.method);
+  addText(target, 'Summary', assessment.explanation.summary);
+  addText(target, 'Reason codes', assessment.explanation.reason_codes.length ? assessment.explanation.reason_codes.join(', ') : 'none');
+  addText(target, 'Feature signals', assessment.explanation.feature_signals.length ? '' : 'none');
+  for (const signal of assessment.explanation.feature_signals) {
+    addText(target, `${signal.feature} — value`, signal.value);
+    addText(target, `${signal.feature} — reason code`, signal.reason_code);
+    addText(target, `${signal.feature} — description`, signal.description);
+  }
+}
+function validOfflineReport(data) {
+  return isRecord(data) && validNonEmptyString(data.disclaimer) && data.disclaimer.includes('LOCAL TEST ONLY')
+    && Array.isArray(data.scenarios) && data.scenarios.length > 0
+    && data.scenarios.every(item => isRecord(item) && validNonEmptyString(item.scenario)
+      && item.execution_label === 'SIMULATED' && item.payment_status === 'NOT_DISPATCHED');
+}
+function renderOfflineReport(data) {
+  const target = document.getElementById('scenario-report');
+  target.textContent = '';
+  addText(target, 'Evidence source', 'Local file (not independently verified)');
+  addText(target, 'Execution', 'SIMULATED — no PayPal transaction or payment');
+  addText(target, 'Disclaimer', data.disclaimer);
+  const providerSafety = document.getElementById('provider-safety-summary');
+  providerSafety.textContent = '';
+  const invocationCount = Number.isSafeInteger(data.provider_invocation_count) && data.provider_invocation_count >= 0
+    ? String(data.provider_invocation_count) : 'UNAVAILABLE — NOT VERIFIED';
+  const dispatchStatus = typeof data.paypal_dispatch === 'string' && data.paypal_dispatch.trim().length > 0 && data.paypal_dispatch.length <= 100
+    ? data.paypal_dispatch : 'UNAVAILABLE — NOT VERIFIED';
+  addText(providerSafety, 'Provider Safety', 'Imported report summary');
+  addText(providerSafety, 'Provider invocations', invocationCount);
+  addText(providerSafety, 'PayPal dispatch', dispatchStatus);
+  for (const item of data.scenarios) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    addText(card, 'Scenario', item.scenario);
+    addText(card, 'Execution label', item.execution_label);
+    addText(card, 'Risk decision', item.risk_decision || item.decision || 'not scored');
+    addText(card, 'Anomaly ranking score (not fraud probability)', Number.isFinite(item.anomaly_score) ? item.anomaly_score : 'not applicable');
+    addText(card, 'Model version', item.model_version || 'not reported');
+    addText(card, 'Training dataset ID', item.training_dataset_id || 'not reported');
+    addText(card, 'Scored at', item.scored_at ?? 'not reported');
+    if (isRecord(item.explanation)) {
+      addText(card, 'Explanation', item.explanation.summary || 'No explanation summary reported');
+      addText(card, 'Explanation method', item.explanation.method || 'not reported');
+    }
+    addText(card, 'Durable ledger state', item.durable_ledger_state || 'not applicable');
+    addText(card, 'Payment status', item.payment_status);
+    if (item.reason_code) addText(card, 'Reason', item.reason_code);
+    target.append(card);
+  }
+  document.getElementById('risk-assessment').textContent = 'Risk evidence is displayed in the imported scenario cards above; it remains simulated and is not a fraud probability.';
+}
+const controls = document.getElementById('controls');
+for (const label of ['JWT signature verification', 'DPoP proof verification', 'Durable grant ledger', 'Fraud risk scoring']) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const heading = document.createElement('strong');
+  heading.textContent = label;
+  const state = document.createElement('div');
+  state.className = 'state';
+  state.textContent = 'NOT VERIFIED BY THIS DEMO';
+  card.append(heading, state);
+  controls.append(card);
+}
+let importedRiskAssessment = false;
+const riskFileInput = document.getElementById('risk-json-file');
+const riskImportStatus = document.getElementById('risk-import-status');
+riskFileInput.addEventListener('change', event => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  importedRiskAssessment = true;
+  document.getElementById('scenario-report').textContent = 'Validating selected local file...';
+  showRiskUnavailable('No valid risk assessment was loaded.');
+  const reader = new FileReader();
+    reader.onload = () => {
+      let parsed;
+    try {
+      parsed = JSON.parse(String(reader.result));
+      } catch {
+      riskImportStatus.textContent = 'Rejected: selected file is not valid JSON.';
+      document.getElementById('scenario-report').textContent = 'Rejected file; no scenario evidence is displayed.';
+      showRiskUnavailable('No valid risk assessment was loaded.');
+        return;
+      }
+      if (validOfflineReport(parsed)) {
+        riskImportStatus.textContent = 'Loaded a LOCAL TEST ONLY scenario report for display; all rows remain SIMULATED / NOT_DISPATCHED.';
+        renderOfflineReport(parsed);
+        return;
+      }
+      const assessment = validRiskAssessment(parsed);
+    if (!assessment) {
+      riskImportStatus.textContent = 'Rejected: JSON must contain a valid risk_assessment object.';
+      document.getElementById('scenario-report').textContent = 'Rejected file; no scenario evidence is displayed.';
+      showRiskUnavailable('No valid risk assessment was loaded.');
+      return;
+    }
+    riskImportStatus.textContent = 'Loaded a local screening response for display only.';
+    document.getElementById('scenario-report').textContent = 'No offline scenario report in this file.';
+    renderRiskAssessment(assessment, 'Local file (not independently verified)');
+  };
+  reader.onerror = () => {
+    riskImportStatus.textContent = 'Rejected: local file could not be read.';
+    document.getElementById('scenario-report').textContent = 'Rejected file; no scenario evidence is displayed.';
+    showRiskUnavailable('No valid risk assessment was loaded.');
+  };
+  reader.readAsText(file);
+});
 fetch('hasil.json')
-  .then(response => response.json())
+  .then(response => { if (!response.ok) throw new Error('Demo data unavailable'); return response.json(); })
   .then(data => {
-    document.getElementById('timestamp').textContent = 'Update: ' + data.timestamp;
-
-    const stat = data.statistik;
-    document.getElementById('statistik-area').innerHTML = `
-      <div class="stat-box"><span class="stat-number">${stat.total_sukses}</span><span class="stat-label">Transaksi Sukses</span></div>
-      <div class="stat-box"><span class="stat-number">${stat.total_diblokir}</span><span class="stat-label">Serangan Diblokir</span></div>
-      <div class="stat-box"><span class="stat-number">${stat.tingkat_keamanan}</span><span class="stat-label">Tingkat Keamanan</span></div>
-    `;
-
-    const trx = data.transaksi_terakhir;
-    document.getElementById('transaksi-area').innerHTML = `
-      <div class="order-id">Order ID: ${trx.order_id}</div>
-      <div class="order-id">Status: ${trx.status}</div>
-      <div class="order-id">Merchant: ${trx.merchant}</div>
-      <div class="order-id">Total: ${trx.total}</div>
-    `;
-
-    let auditHtml = '';
-    data.audit_trail.forEach(item => {
-      auditHtml += `<div class="audit-item">[${item.waktu}] ${item.event} → <strong>${item.hasil}</strong></div>`;
-    });
-    document.getElementById('audit-area').innerHTML = auditHtml;
+    if (!importedRiskAssessment) {
+      const assessment = validRiskAssessment(data);
+      if (assessment) renderRiskAssessment(assessment, 'Sample data (not independently verified)');
+      else showRiskUnavailable('No valid risk assessment is present in the sample data.');
+    }
+    const tx = data.transaksi_terakhir;
+    const transaction = document.getElementById('transaction');
+    transaction.textContent = '';
+    if (tx && tx.status === 'UNKNOWN') addText(transaction, 'Transaction state', 'UNKNOWN — unresolved; not a success');
+    else if (tx) {
+      addText(transaction, 'Demo transaction state', tx.status || 'SIMULATED');
+      addText(transaction, 'Order reference', tx.order_id || 'none');
+      addText(transaction, 'Payee', tx.merchant || 'unavailable');
+      addText(transaction, 'Amount', tx.total || 'unavailable');
+    } else addText(transaction, 'Evidence', 'No transaction evidence is present.');
+    const stats = document.getElementById('statistics');
+    stats.textContent = '';
+    if (data.statistik) for (const [key, value] of Object.entries(data.statistik)) addText(stats, key, value);
+    else addText(stats, 'Statistics', 'Not supplied');
+    const audit = document.getElementById('audit');
+    audit.textContent = '';
+    for (const item of Array.isArray(data.audit_trail) ? data.audit_trail : []) {
+      addText(audit, `${item.waktu || 'time unavailable'} — ${item.event || 'event unavailable'}`, item.hasil || 'unknown');
+    }
+    document.getElementById('timestamp').textContent = `Demo data timestamp: ${String(data.timestamp || 'unavailable')}`;
   })
-  .catch(err => {
-    document.getElementById('statistik-area').innerHTML = 'Error: ' + err.message + ' (butuh server lokal)';
+  .catch(() => {
+    document.getElementById('transaction').textContent = 'No live transaction evidence is connected.';
+    document.getElementById('statistics').textContent = 'No verified backend statistics are connected.';
+    document.getElementById('audit').textContent = 'No verified backend audit events are connected.';
   });
 </script>
 </body>
