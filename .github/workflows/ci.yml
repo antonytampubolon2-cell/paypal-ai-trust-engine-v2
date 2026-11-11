@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - manus/trustguard-security-remediation-2026-11-12
+      - manus/paypal-sandbox-integration
   pull_request:
     branches:
       - main
